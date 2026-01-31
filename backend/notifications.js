@@ -116,10 +116,38 @@ async function notifyUsers(userIds, title, message, data = {}) {
   return sendPushNotification(title, message, userIds, data);
 }
 
+/**
+ * إشعار إضافة نقاط للطالب
+ */
+async function notifyPointsAdded(studentId, points, newTotal, fuelName, fuelEmoji, reason = '') {
+  const reasonText = reason ? `\nالسبب: ${reason}` : '';
+  return sendPushNotification(
+    'تم إضافة نقاط ➕',
+    `حصلت على ${points} نقاط! وقودك الآن: ${fuelEmoji} ${fuelName} (${newTotal} نقاط)${reasonText}`,
+    studentId,
+    { type: 'points_added' }
+  );
+}
+
+/**
+ * إشعار خصم نقاط من الطالب
+ */
+async function notifyPointsSubtracted(studentId, points, newTotal, fuelName, fuelEmoji, reason = '') {
+  const reasonText = reason ? `\nالسبب: ${reason}` : '';
+  return sendPushNotification(
+    'تم خصم نقاط ➖',
+    `تم خصم ${points} نقاط. وقودك الآن: ${fuelEmoji} ${fuelName} (${newTotal} نقاط)${reasonText}`,
+    studentId,
+    { type: 'points_subtracted' }
+  );
+}
+
 module.exports = {
   sendPushNotification,
   notifyRequestApproved,
   notifyRequestRejected,
   notifyNewRequest,
   notifyUsers,
+  notifyPointsAdded,
+  notifyPointsSubtracted,
 };

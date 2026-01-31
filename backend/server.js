@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId } = require('./database');
 const PDFDocument = require('pdfkit');
-const { notifyRequestApproved, notifyRequestRejected, notifyNewRequest } = require('./notifications');
+const { notifyRequestApproved, notifyRequestRejected, notifyNewRequest, notifyPointsAdded, notifyPointsSubtracted } = require('./notifications');
 
 // مسار الخط العربي
 const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
@@ -234,6 +234,24 @@ app.post('/api/students/:id/points', async (req, res) => {
     // تحديد نوع الوقود بناءً على النقاط (الحد الأقصى 5)
     const fuelLevel = Math.min(Math.max(newPoints, 0), 5);
     const fuelType = fuelLevel > 0 ? pointsToFuel(fuelLevel) : { name: 'لا يوجد', emoji: '⚫' };
+
+    // إرسال إشعار للطالب
+    if (action === 'add') {
+      await notifyPointsAdded(req.params.id, points, newPoints, fuelType.name, fuelType.emoji, reason);
+    } else {
+      await notifyPointsSubtracted(req.params.id, points, newPoints, fuelType.name, fuelType.emoji, reason);
+    }
+
+    // إنشاء إشعار في قاعدة البيانات أيضاً
+    const notifTitle = action === 'add' ? 'تم إضافة نقاط ➕' : 'تم خصم نقاط ➖';
+    const notifMessage = action === 'add'
+      ? `حصلت على ${points} نقاط! وقودك الآن: ${fuelType.emoji} ${fuelType.name}`
+      : `تم خصم ${points} نقاط. وقودك الآن: ${fuelType.emoji} ${fuelType.name}`;
+
+    await run(`
+      INSERT INTO notifications (user_id, title, message)
+      VALUES (${req.params.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
+    `);
 
     res.json({
       success: true,
