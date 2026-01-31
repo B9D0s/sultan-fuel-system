@@ -738,17 +738,20 @@ async function renderStudentsPage() {
                       <td><code>${s.code}</code></td>
                       <td>${s.group_name || 'غير محدد'}</td>
                       <td>
-                        <span class="points-badge" id="points-${s.id}">${s.total_points || 0}</span>
-                        ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
-                          <div class="points-actions">
-                            <button class="points-btn add" onclick="showAddPointsModal(${s.id}, '${s.name}')" title="إضافة نقاط">
-                              <i class="fas fa-plus"></i>
-                            </button>
-                            <button class="points-btn subtract" onclick="showSubtractPointsModal(${s.id}, '${s.name}')" title="خصم نقاط">
-                              <i class="fas fa-minus"></i>
-                            </button>
-                          </div>
-                        ` : ''}
+                        <div class="points-cell">
+                          <span class="fuel-indicator" id="fuel-${s.id}">${getFuelEmoji(s.total_points || 0)}</span>
+                          <span class="points-badge" id="points-${s.id}">${s.total_points || 0}</span>
+                          ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
+                            <div class="points-actions">
+                              <button class="points-btn add" onclick="showAddPointsModal(${s.id}, '${s.name}', ${s.total_points || 0})" title="إضافة نقاط">
+                                <i class="fas fa-plus"></i>
+                              </button>
+                              <button class="points-btn subtract" onclick="showSubtractPointsModal(${s.id}, '${s.name}', ${s.total_points || 0})" title="خصم نقاط">
+                                <i class="fas fa-minus"></i>
+                              </button>
+                            </div>
+                          ` : ''}
+                        </div>
                       </td>
                       ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
                         <td>
@@ -876,17 +879,34 @@ async function deleteStudent(id) {
 }
 
 // ==================== Points Management ====================
-function showAddPointsModal(studentId, studentName) {
+
+// دالة تحويل النقاط إلى إيموجي الوقود
+function getFuelEmoji(points) {
+  if (points <= 0) return '⚫';
+  if (points >= 5) return '🟦'; // إيثانول
+  if (points >= 4) return '⚪'; // 98
+  if (points >= 3) return '🟥'; // 95
+  if (points >= 2) return '🟩'; // 91
+  return '🟫'; // ديزل
+}
+
+function getFuelName(points) {
+  if (points <= 0) return 'لا يوجد';
+  if (points >= 5) return 'إيثانول';
+  if (points >= 4) return '98';
+  if (points >= 3) return '95';
+  if (points >= 2) return '91';
+  return 'ديزل';
+}
+
+function showAddPointsModal(studentId, studentName, currentPoints = 0) {
   openModal(`إضافة نقاط - ${studentName}`, `
+    <div class="current-fuel-status">
+      <span>الوقود الحالي: ${getFuelEmoji(currentPoints)} ${getFuelName(currentPoints)} (${currentPoints} نقاط)</span>
+    </div>
     <div class="form-group">
-      <label>عدد النقاط</label>
-      <select id="points-amount">
-        <option value="1">1 نقطة</option>
-        <option value="2">2 نقاط</option>
-        <option value="3">3 نقاط</option>
-        <option value="4">4 نقاط</option>
-        <option value="5">5 نقاط</option>
-      </select>
+      <label>عدد النقاط للإضافة</label>
+      <input type="number" id="points-amount" min="1" value="1" class="points-input">
     </div>
     <div class="form-group">
       <label>السبب (اختياري)</label>
@@ -898,17 +918,19 @@ function showAddPointsModal(studentId, studentName) {
   `);
 }
 
-function showSubtractPointsModal(studentId, studentName) {
+function showSubtractPointsModal(studentId, studentName, currentPoints = 0) {
+  if (currentPoints <= 0) {
+    alert('لا يمكن خصم نقاط - الطالب ليس لديه نقاط');
+    return;
+  }
+
   openModal(`خصم نقاط - ${studentName}`, `
+    <div class="current-fuel-status">
+      <span>الوقود الحالي: ${getFuelEmoji(currentPoints)} ${getFuelName(currentPoints)} (${currentPoints} نقاط)</span>
+    </div>
     <div class="form-group">
-      <label>عدد النقاط</label>
-      <select id="points-amount">
-        <option value="1">1 نقطة</option>
-        <option value="2">2 نقاط</option>
-        <option value="3">3 نقاط</option>
-        <option value="4">4 نقاط</option>
-        <option value="5">5 نقاط</option>
-      </select>
+      <label>عدد النقاط للخصم (الحد الأقصى: ${currentPoints})</label>
+      <input type="number" id="points-amount" min="1" max="${currentPoints}" value="1" class="points-input">
     </div>
     <div class="form-group">
       <label>السبب (اختياري)</label>
@@ -939,10 +961,9 @@ async function addPoints(studentId) {
     const data = await response.json();
     if (data.success) {
       closeModal();
-      // تحديث النقاط في الصفحة بدون إعادة تحميل
-      const pointsEl = document.getElementById(`points-${studentId}`);
-      if (pointsEl) pointsEl.textContent = data.total_points;
-      alert('تم إضافة النقاط بنجاح!');
+      // تحديث النقاط والوقود في الصفحة بدون إعادة تحميل
+      updateStudentPoints(studentId, data.total_points);
+      alert(`تم إضافة النقاط بنجاح! الوقود الجديد: ${data.fuel_emoji} ${data.fuel_type}`);
     } else {
       alert(data.message || 'حدث خطأ');
     }
@@ -970,16 +991,24 @@ async function subtractPoints(studentId) {
     const data = await response.json();
     if (data.success) {
       closeModal();
-      // تحديث النقاط في الصفحة بدون إعادة تحميل
-      const pointsEl = document.getElementById(`points-${studentId}`);
-      if (pointsEl) pointsEl.textContent = data.total_points;
-      alert('تم خصم النقاط بنجاح!');
+      // تحديث النقاط والوقود في الصفحة بدون إعادة تحميل
+      updateStudentPoints(studentId, data.total_points);
+      alert(`تم خصم النقاط بنجاح! الوقود الجديد: ${data.fuel_emoji} ${data.fuel_type}`);
     } else {
       alert(data.message || 'حدث خطأ');
     }
   } catch (error) {
     alert('حدث خطأ في الاتصال');
   }
+}
+
+// تحديث عرض النقاط والوقود
+function updateStudentPoints(studentId, newPoints) {
+  const pointsEl = document.getElementById(`points-${studentId}`);
+  const fuelEl = document.getElementById(`fuel-${studentId}`);
+
+  if (pointsEl) pointsEl.textContent = newPoints;
+  if (fuelEl) fuelEl.textContent = getFuelEmoji(newPoints);
 }
 
 // ==================== Requests Page ====================

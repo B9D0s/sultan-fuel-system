@@ -192,29 +192,55 @@ app.post('/api/students/:id/points', async (req, res) => {
   const { points, action, reason, reviewer_id } = req.body;
   // action: 'add' للإضافة أو 'subtract' للخصم
 
-  if (!points || points < 1 || points > 5) {
-    return res.status(400).json({ success: false, message: 'النقاط يجب أن تكون بين 1 و 5' });
+  if (!points || points < 1) {
+    return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
   }
 
   try {
+    // جلب النقاط الحالية
+    const currentResult = await queryOne(`
+      SELECT COALESCE(SUM(points), 0) as total_points
+      FROM requests
+      WHERE student_id = ${req.params.id} AND status = 'approved'
+    `);
+    const currentPoints = currentResult.total_points || 0;
+
+    // التحقق من إمكانية الخصم
+    if (action === 'subtract' && currentPoints < points) {
+      return res.status(400).json({
+        success: false,
+        message: `لا يمكن خصم ${points} نقاط. الطالب لديه ${currentPoints} نقاط فقط`
+      });
+    }
+
     const weekNumber = getWeekNumber();
     const actualPoints = action === 'subtract' ? -points : points;
     const safeReason = (reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي')).replace(/'/g, "''");
 
-    // إنشاء طلب وهمي مقبول تلقائياً
+    // إنشاء سجل تعديل النقاط
     await run(`
       INSERT INTO requests (student_id, committee, description, points, status, reviewed_by, reviewed_at, week_number)
       VALUES (${req.params.id}, 'عامة', '${safeReason}', ${actualPoints}, 'approved', ${reviewer_id}, datetime('now'), ${weekNumber})
     `);
 
     // جلب النقاط الجديدة
-    const result = await queryOne(`
+    const newResult = await queryOne(`
       SELECT COALESCE(SUM(points), 0) as total_points
       FROM requests
       WHERE student_id = ${req.params.id} AND status = 'approved'
     `);
 
-    res.json({ success: true, total_points: result.total_points });
+    const newPoints = newResult.total_points;
+    // تحديد نوع الوقود بناءً على النقاط (الحد الأقصى 5)
+    const fuelLevel = Math.min(Math.max(newPoints, 0), 5);
+    const fuelType = fuelLevel > 0 ? pointsToFuel(fuelLevel) : { name: 'لا يوجد', emoji: '⚫' };
+
+    res.json({
+      success: true,
+      total_points: newPoints,
+      fuel_type: fuelType.name,
+      fuel_emoji: fuelType.emoji
+    });
   } catch (error) {
     console.error('خطأ في تعديل النقاط:', error);
     res.status(400).json({ success: false, message: 'حدث خطأ في تعديل النقاط' });
