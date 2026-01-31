@@ -889,20 +889,16 @@ tr:hover {
     display: flex;
   }
 
+  /* إخفاء الـ Sidebar تماماً على الجوال */
   .sidebar {
-    transform: translateX(100%);
-    transition: transform 0.3s ease;
-  }
-
-  .sidebar.active {
-    transform: translateX(0);
+    display: none !important;
   }
 
   .main-content {
     margin-right: 0;
-    padding: 20px;
-    padding-top: 80px;
-    padding-bottom: 100px;
+    padding: 15px;
+    padding-top: 75px;
+    padding-bottom: 90px;
   }
 
   .page-header {
@@ -939,6 +935,63 @@ tr:hover {
     width: 40px;
     height: 40px;
     font-size: 1.2rem;
+  }
+
+  /* تحسين الجداول على الجوال */
+  .card {
+    border-radius: 12px;
+    margin: 0 -5px;
+  }
+
+  .card-header {
+    padding: 15px;
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .card-body {
+    padding: 10px;
+  }
+
+  .table-container {
+    margin: 0 -10px;
+  }
+
+  table {
+    font-size: 0.8rem;
+  }
+
+  th, td {
+    padding: 10px 8px;
+    white-space: nowrap;
+  }
+
+  /* إخفاء بعض الأعمدة غير المهمة */
+  table th:nth-child(1),
+  table td:nth-child(1) {
+    display: none;
+  }
+
+  .action-btns {
+    flex-direction: row;
+    gap: 5px;
+  }
+
+  .action-btn {
+    width: 32px;
+    height: 32px;
+    font-size: 0.8rem;
+  }
+
+  .status-badge {
+    padding: 4px 8px;
+    font-size: 0.75rem;
+  }
+
+  /* تحسين لوحة الإشعارات */
+  .notifications-panel {
+    width: 100%;
   }
 }
 
