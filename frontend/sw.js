@@ -1,14 +1,12 @@
 // Service Worker - طاقات السلطان
-const CACHE_NAME = 'sultan-fuel-v1';
+const CACHE_NAME = 'sultan-fuel-v2';
 const urlsToCache = [
   '/',
   '/index.html',
   '/css/style.css',
   '/js/api.js',
   '/js/app.js',
-  '/manifest.json',
-  'https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap',
-  'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'
+  '/manifest.json'
 ];
 
 // تثبيت Service Worker
@@ -45,16 +43,31 @@ self.addEventListener('activate', (event) => {
 
 // استراتيجية Network First مع Fallback للكاش
 self.addEventListener('fetch', (event) => {
+  // تجاهل طلبات غير HTTP/HTTPS
+  if (!event.request.url.startsWith('http')) {
+    return;
+  }
+
   // تجاهل طلبات API
   if (event.request.url.includes('/api/')) {
+    return;
+  }
+
+  // تجاهل طلبات OneSignal
+  if (event.request.url.includes('onesignal.com')) {
+    return;
+  }
+
+  // تجاهل طلبات chrome-extension
+  if (event.request.url.startsWith('chrome-extension://')) {
     return;
   }
 
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // نسخ الاستجابة للكاش
-        if (response.status === 200) {
+        // فقط خزّن الطلبات الناجحة من نفس الموقع
+        if (response.status === 200 && event.request.url.startsWith(self.location.origin)) {
           const responseClone = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, responseClone);
@@ -79,8 +92,18 @@ self.addEventListener('fetch', (event) => {
 
 // استقبال الإشعارات
 self.addEventListener('push', (event) => {
+  let data = { title: 'طاقات السلطان', body: 'إشعار جديد' };
+
+  if (event.data) {
+    try {
+      data = event.data.json();
+    } catch (e) {
+      data.body = event.data.text();
+    }
+  }
+
   const options = {
-    body: event.data ? event.data.text() : 'إشعار جديد',
+    body: data.body || data.message || 'إشعار جديد',
     icon: '/icons/icon-192.png',
     badge: '/icons/icon-72.png',
     vibrate: [100, 50, 100],
@@ -88,16 +111,12 @@ self.addEventListener('push', (event) => {
     lang: 'ar',
     data: {
       dateOfArrival: Date.now(),
-      primaryKey: 1
-    },
-    actions: [
-      { action: 'open', title: 'فتح' },
-      { action: 'close', title: 'إغلاق' }
-    ]
+      url: data.url || '/'
+    }
   };
 
   event.waitUntil(
-    self.registration.showNotification('طاقات السلطان', options)
+    self.registration.showNotification(data.title || 'طاقات السلطان', options)
   );
 });
 
@@ -105,9 +124,7 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
-  if (event.action === 'open' || !event.action) {
-    event.waitUntil(
-      clients.openWindow('/')
-    );
-  }
+  event.waitUntil(
+    clients.openWindow(event.notification.data.url || '/')
+  );
 });
