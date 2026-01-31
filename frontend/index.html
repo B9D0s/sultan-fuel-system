@@ -5,6 +5,62 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>طاقات السلطان - نظام الوقود التحفيزي</title>
 
+  <!-- OneSignal SDK -->
+  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+  <script>
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    OneSignalDeferred.push(async function(OneSignal) {
+      await OneSignal.init({
+        appId: "31ae51d1-51bc-406b-8c05-3cc577d100b0",
+        // Safari Web ID - أضفه لاحقاً إذا حصلت عليه
+        // safari_web_id: "web.onesignal.auto.XXXXX",
+        notifyButton: {
+          enable: true,
+          size: 'medium',
+          position: 'bottom-left',
+          text: {
+            'tip.state.unsubscribed': 'اشترك في الإشعارات',
+            'tip.state.subscribed': 'أنت مشترك في الإشعارات',
+            'tip.state.blocked': 'لقد حظرت الإشعارات',
+            'message.prenotify': 'انقر للاشتراك في الإشعارات',
+            'message.action.subscribed': 'شكراً للاشتراك!',
+            'message.action.resubscribed': 'أنت مشترك في الإشعارات',
+            'message.action.unsubscribed': 'لن تتلقى إشعارات بعد الآن',
+            'dialog.main.title': 'إدارة الإشعارات',
+            'dialog.main.button.subscribe': 'اشترك',
+            'dialog.main.button.unsubscribe': 'إلغاء الاشتراك',
+            'dialog.blocked.title': 'إلغاء حظر الإشعارات',
+            'dialog.blocked.message': 'اتبع هذه التعليمات للسماح بالإشعارات:'
+          }
+        },
+        welcomeNotification: {
+          title: "طاقات السلطان",
+          message: "شكراً لاشتراكك! ستصلك الإشعارات الآن 🚀"
+        },
+        promptOptions: {
+          slidedown: {
+            prompts: [{
+              type: "push",
+              autoPrompt: true,
+              text: {
+                actionMessage: "نود إرسال إشعارات لك عند قبول أو رفض طلباتك",
+                acceptButton: "السماح",
+                cancelButton: "لاحقاً"
+              },
+              delay: {
+                pageViews: 1,
+                timeDelay: 5
+              }
+            }]
+          }
+        }
+      });
+
+      // ربط المستخدم بعد تسجيل الدخول
+      window.OneSignalInitialized = true;
+    });
+  </script>
+
   <!-- PWA Meta Tags -->
   <meta name="theme-color" content="#088395">
   <meta name="apple-mobile-web-app-capable" content="yes">

@@ -1,5 +1,8 @@
 // Service Worker - طاقات السلطان
-const CACHE_NAME = 'sultan-fuel-v1';
+// ملاحظة: OneSignal يستخدم Service Worker خاص به (OneSignalSDKWorker.js)
+// هذا الملف للتخزين المؤقت فقط
+
+const CACHE_NAME = 'sultan-fuel-v2';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -77,37 +80,5 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// استقبال الإشعارات
-self.addEventListener('push', (event) => {
-  const options = {
-    body: event.data ? event.data.text() : 'إشعار جديد',
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-72.png',
-    vibrate: [100, 50, 100],
-    dir: 'rtl',
-    lang: 'ar',
-    data: {
-      dateOfArrival: Date.now(),
-      primaryKey: 1
-    },
-    actions: [
-      { action: 'open', title: 'فتح' },
-      { action: 'close', title: 'إغلاق' }
-    ]
-  };
-
-  event.waitUntil(
-    self.registration.showNotification('طاقات السلطان', options)
-  );
-});
-
-// التعامل مع النقر على الإشعار
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-
-  if (event.action === 'open' || !event.action) {
-    event.waitUntil(
-      clients.openWindow('/')
-    );
-  }
-});
+// ملاحظة: الإشعارات تتم معالجتها بواسطة OneSignal Service Worker
+// هذا الكود للتوافق مع الإصدارات القديمة فقط

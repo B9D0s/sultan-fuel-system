@@ -91,18 +91,57 @@ function showError(element, message) {
 function handleLoginSuccess(user) {
   currentUser = user;
   localStorage.setItem('user', JSON.stringify(user));
+
+  // ربط المستخدم مع OneSignal للإشعارات
+  linkUserToOneSignal(user);
+
   showDashboard();
+}
+
+// ربط المستخدم مع OneSignal
+async function linkUserToOneSignal(user) {
+  if (typeof OneSignal === 'undefined' && window.OneSignalDeferred) {
+    window.OneSignalDeferred.push(async function(OneSignal) {
+      await setupOneSignalUser(OneSignal, user);
+    });
+  } else if (typeof OneSignal !== 'undefined') {
+    await setupOneSignalUser(OneSignal, user);
+  }
+}
+
+async function setupOneSignalUser(OneSignal, user) {
+  try {
+    // تعيين External User ID للمستخدم
+    await OneSignal.login(user.id.toString());
+
+    // إضافة Tags للمستخدم (للتصفية عند الإرسال)
+    await OneSignal.User.addTags({
+      user_id: user.id.toString(),
+      user_role: user.role,
+      user_name: user.name,
+      group_id: user.group_id ? user.group_id.toString() : 'none'
+    });
+
+    console.log('تم ربط المستخدم مع OneSignal:', user.id);
+  } catch (error) {
+    console.error('خطأ في ربط المستخدم مع OneSignal:', error);
+  }
 }
 
 function checkStoredSession() {
   const stored = localStorage.getItem('user');
   if (stored) {
     currentUser = JSON.parse(stored);
+    // ربط المستخدم مع OneSignal عند استعادة الجلسة
+    linkUserToOneSignal(currentUser);
     showDashboard();
   }
 }
 
 function logout() {
+  // فصل المستخدم من OneSignal
+  unlinkUserFromOneSignal();
+
   currentUser = null;
   localStorage.removeItem('user');
   loginPage.style.display = 'flex';
@@ -110,6 +149,18 @@ function logout() {
   document.getElementById('login-code').value = '';
   document.getElementById('admin-username').value = '';
   document.getElementById('admin-password').value = '';
+}
+
+// فصل المستخدم من OneSignal عند تسجيل الخروج
+async function unlinkUserFromOneSignal() {
+  try {
+    if (typeof OneSignal !== 'undefined') {
+      await OneSignal.logout();
+      console.log('تم فصل المستخدم من OneSignal');
+    }
+  } catch (error) {
+    console.error('خطأ في فصل المستخدم من OneSignal:', error);
+  }
 }
 
 // ==================== Dashboard ====================
