@@ -726,7 +726,8 @@ async function renderStudentsPage() {
                     <th>الاسم</th>
                     <th>الرمز</th>
                     <th>الأسرة</th>
-                    ${currentUser.role === 'admin' ? '<th>الإجراءات</th>' : ''}
+                    <th>النقاط</th>
+                    ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? '<th>الإجراءات</th>' : ''}
                   </tr>
                 </thead>
                 <tbody>
@@ -736,15 +737,30 @@ async function renderStudentsPage() {
                       <td>${s.name}</td>
                       <td><code>${s.code}</code></td>
                       <td>${s.group_name || 'غير محدد'}</td>
-                      ${currentUser.role === 'admin' ? `
+                      <td>
+                        <span class="points-badge" id="points-${s.id}">${s.total_points || 0}</span>
+                        ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
+                          <div class="points-actions">
+                            <button class="points-btn add" onclick="showAddPointsModal(${s.id}, '${s.name}')" title="إضافة نقاط">
+                              <i class="fas fa-plus"></i>
+                            </button>
+                            <button class="points-btn subtract" onclick="showSubtractPointsModal(${s.id}, '${s.name}')" title="خصم نقاط">
+                              <i class="fas fa-minus"></i>
+                            </button>
+                          </div>
+                        ` : ''}
+                      </td>
+                      ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
                         <td>
                           <div class="action-btns">
-                            <button class="action-btn edit" onclick='showEditStudentModal(${JSON.stringify(s)})'>
-                              <i class="fas fa-edit"></i>
-                            </button>
-                            <button class="action-btn delete" onclick="deleteStudent(${s.id})">
-                              <i class="fas fa-trash"></i>
-                            </button>
+                            ${currentUser.role === 'admin' ? `
+                              <button class="action-btn edit" onclick='showEditStudentModal(${JSON.stringify(s)})'>
+                                <i class="fas fa-edit"></i>
+                              </button>
+                              <button class="action-btn delete" onclick="deleteStudent(${s.id})">
+                                <i class="fas fa-trash"></i>
+                              </button>
+                            ` : ''}
                           </div>
                         </td>
                       ` : ''}
@@ -856,6 +872,113 @@ async function deleteStudent(id) {
     renderStudentsPage();
   } catch (error) {
     alert(error.message);
+  }
+}
+
+// ==================== Points Management ====================
+function showAddPointsModal(studentId, studentName) {
+  openModal(`إضافة نقاط - ${studentName}`, `
+    <div class="form-group">
+      <label>عدد النقاط</label>
+      <select id="points-amount">
+        <option value="1">1 نقطة</option>
+        <option value="2">2 نقاط</option>
+        <option value="3">3 نقاط</option>
+        <option value="4">4 نقاط</option>
+        <option value="5">5 نقاط</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>السبب (اختياري)</label>
+      <input type="text" id="points-reason" placeholder="سبب إضافة النقاط">
+    </div>
+  `, `
+    <button class="btn btn-secondary btn-small" onclick="closeModal()">إلغاء</button>
+    <button class="btn btn-primary btn-small" onclick="addPoints(${studentId})">إضافة</button>
+  `);
+}
+
+function showSubtractPointsModal(studentId, studentName) {
+  openModal(`خصم نقاط - ${studentName}`, `
+    <div class="form-group">
+      <label>عدد النقاط</label>
+      <select id="points-amount">
+        <option value="1">1 نقطة</option>
+        <option value="2">2 نقاط</option>
+        <option value="3">3 نقاط</option>
+        <option value="4">4 نقاط</option>
+        <option value="5">5 نقاط</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>السبب (اختياري)</label>
+      <input type="text" id="points-reason" placeholder="سبب خصم النقاط">
+    </div>
+  `, `
+    <button class="btn btn-secondary btn-small" onclick="closeModal()">إلغاء</button>
+    <button class="btn btn-danger btn-small" onclick="subtractPoints(${studentId})">خصم</button>
+  `);
+}
+
+async function addPoints(studentId) {
+  const points = parseInt(document.getElementById('points-amount').value);
+  const reason = document.getElementById('points-reason').value;
+
+  try {
+    const response = await fetch(`${API_BASE}/students/${studentId}/points`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        points,
+        action: 'add',
+        reason: reason || 'إضافة نقاط يدوية',
+        reviewer_id: currentUser.id
+      })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      closeModal();
+      // تحديث النقاط في الصفحة بدون إعادة تحميل
+      const pointsEl = document.getElementById(`points-${studentId}`);
+      if (pointsEl) pointsEl.textContent = data.total_points;
+      alert('تم إضافة النقاط بنجاح!');
+    } else {
+      alert(data.message || 'حدث خطأ');
+    }
+  } catch (error) {
+    alert('حدث خطأ في الاتصال');
+  }
+}
+
+async function subtractPoints(studentId) {
+  const points = parseInt(document.getElementById('points-amount').value);
+  const reason = document.getElementById('points-reason').value;
+
+  try {
+    const response = await fetch(`${API_BASE}/students/${studentId}/points`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        points,
+        action: 'subtract',
+        reason: reason || 'خصم نقاط يدوي',
+        reviewer_id: currentUser.id
+      })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      closeModal();
+      // تحديث النقاط في الصفحة بدون إعادة تحميل
+      const pointsEl = document.getElementById(`points-${studentId}`);
+      if (pointsEl) pointsEl.textContent = data.total_points;
+      alert('تم خصم النقاط بنجاح!');
+    } else {
+      alert(data.message || 'حدث خطأ');
+    }
+  } catch (error) {
+    alert('حدث خطأ في الاتصال');
   }
 }
 

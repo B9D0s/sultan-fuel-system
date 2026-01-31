@@ -142,7 +142,8 @@ app.delete('/api/supervisors/:id', async (req, res) => {
 // جلب كل الطلاب
 app.get('/api/students', async (req, res) => {
   const students = await queryAll(`
-    SELECT u.id, u.name, u.code, u.group_id, g.name as group_name, u.created_at
+    SELECT u.id, u.name, u.code, u.group_id, g.name as group_name, u.created_at,
+    COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) as total_points
     FROM users u
     LEFT JOIN groups g ON u.group_id = g.id
     WHERE u.role = 'student'
@@ -183,6 +184,40 @@ app.delete('/api/students/:id', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
+  }
+});
+
+// تعديل نقاط طالب (إضافة أو خصم)
+app.post('/api/students/:id/points', async (req, res) => {
+  const { points, action, reason, reviewer_id } = req.body;
+  // action: 'add' للإضافة أو 'subtract' للخصم
+
+  if (!points || points < 1 || points > 5) {
+    return res.status(400).json({ success: false, message: 'النقاط يجب أن تكون بين 1 و 5' });
+  }
+
+  try {
+    const weekNumber = getWeekNumber();
+    const actualPoints = action === 'subtract' ? -points : points;
+    const safeReason = (reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي')).replace(/'/g, "''");
+
+    // إنشاء طلب وهمي مقبول تلقائياً
+    await run(`
+      INSERT INTO requests (student_id, committee, description, points, status, reviewed_by, reviewed_at, week_number)
+      VALUES (${req.params.id}, 'عامة', '${safeReason}', ${actualPoints}, 'approved', ${reviewer_id}, datetime('now'), ${weekNumber})
+    `);
+
+    // جلب النقاط الجديدة
+    const result = await queryOne(`
+      SELECT COALESCE(SUM(points), 0) as total_points
+      FROM requests
+      WHERE student_id = ${req.params.id} AND status = 'approved'
+    `);
+
+    res.json({ success: true, total_points: result.total_points });
+  } catch (error) {
+    console.error('خطأ في تعديل النقاط:', error);
+    res.status(400).json({ success: false, message: 'حدث خطأ في تعديل النقاط' });
   }
 });
 
@@ -248,7 +283,14 @@ app.post('/api/requests', async (req, res) => {
 
     // إرسال إشعار للمشرفين والأدمن بوجود طلب جديد
     const student = await queryOne(`SELECT name FROM users WHERE id = ${student_id}`);
-    await notifyNewRequest(student ? student.name : 'طالب');
+
+    // جلب معرفات المشرفين والأدمن
+    const supervisors = await queryAll(`SELECT id FROM users WHERE role = 'supervisor'`);
+    const admins = await queryAll(`SELECT id FROM users WHERE role = 'admin'`);
+    const supervisorIds = supervisors.map(s => s.id);
+    const adminIds = admins.map(a => a.id);
+
+    await notifyNewRequest(student ? student.name : 'طالب', supervisorIds, adminIds);
 
     res.json({ success: true, id });
   } catch (error) {

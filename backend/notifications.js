@@ -90,15 +90,22 @@ async function notifyRequestRejected(studentId, reason = null) {
 
 /**
  * إشعار للمشرفين والأدمن بوجود طلب جديد
- * يرسل للجميع - المشرفين والأدمن راح يشوفونه
+ * يرسل فقط للمشرفين والأدمن (بناءً على Tags)
  */
-async function notifyNewRequest(studentName) {
+async function notifyNewRequest(studentName, supervisorIds = [], adminIds = []) {
+  // جمع كل المعرفات (مشرفين + أدمن)
+  const targetIds = [...supervisorIds, ...adminIds];
+
+  if (targetIds.length === 0) {
+    console.log('⚠️ لا يوجد مشرفين أو أدمن لإرسال الإشعار لهم');
+    return { success: false, error: 'No supervisors or admins found' };
+  }
+
   return sendPushNotification(
     'طلب جديد 📝',
     `${studentName} أرسل طلب وقود جديد`,
-    null,
-    { type: 'new_request' },
-    'All' // للجميع
+    targetIds,
+    { type: 'new_request' }
   );
 }
 
