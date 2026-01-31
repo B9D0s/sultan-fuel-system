@@ -7,10 +7,11 @@ const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
  * إرسال إشعار Push عبر OneSignal
  * @param {string} title - عنوان الإشعار
  * @param {string} message - نص الإشعار
- * @param {string} userId - معرف المستخدم (external_user_id)
+ * @param {string|array} userId - معرف المستخدم أو مصفوفة من المعرفات
  * @param {object} data - بيانات إضافية (اختياري)
+ * @param {string} segment - شريحة المستخدمين (اختياري)
  */
-async function sendPushNotification(title, message, userId = null, data = {}) {
+async function sendPushNotification(title, message, userId = null, data = {}, segment = null) {
   // تحقق من وجود المفاتيح
   if (!ONESIGNAL_APP_ID || !ONESIGNAL_API_KEY) {
     console.log('⚠️ OneSignal غير مفعّل - المفاتيح غير موجودة');
@@ -25,9 +26,14 @@ async function sendPushNotification(title, message, userId = null, data = {}) {
       data: data,
     };
 
-    // إذا حددنا مستخدم معين
+    // إذا حددنا مستخدم معين أو مصفوفة مستخدمين
     if (userId) {
-      notification.include_external_user_ids = [String(userId)];
+      const userIds = Array.isArray(userId) ? userId.map(String) : [String(userId)];
+      notification.include_aliases = { external_id: userIds };
+      notification.target_channel = "push";
+    } else if (segment) {
+      // إرسال لشريحة معينة
+      notification.included_segments = [segment];
     } else {
       // إرسال للجميع
       notification.included_segments = ['All'];
@@ -58,7 +64,7 @@ async function sendPushNotification(title, message, userId = null, data = {}) {
 }
 
 /**
- * إشعار قبول الطلب
+ * إشعار قبول الطلب - للطالب
  */
 async function notifyRequestApproved(studentId, fuelName, fuelEmoji) {
   return sendPushNotification(
@@ -70,7 +76,7 @@ async function notifyRequestApproved(studentId, fuelName, fuelEmoji) {
 }
 
 /**
- * إشعار رفض الطلب
+ * إشعار رفض الطلب - للطالب
  */
 async function notifyRequestRejected(studentId, reason = null) {
   const message = reason ? `السبب: ${reason}` : 'لم يتم تحديد سبب';
@@ -83,15 +89,24 @@ async function notifyRequestRejected(studentId, reason = null) {
 }
 
 /**
- * إشعار للمشرفين بوجود طلب جديد
+ * إشعار للمشرفين والأدمن بوجود طلب جديد
+ * يرسل للجميع - المشرفين والأدمن راح يشوفونه
  */
 async function notifyNewRequest(studentName) {
   return sendPushNotification(
     'طلب جديد 📝',
     `${studentName} أرسل طلب وقود جديد`,
-    null, // للجميع (المشرفين)
-    { type: 'new_request' }
+    null,
+    { type: 'new_request' },
+    'All' // للجميع
   );
+}
+
+/**
+ * إشعار مخصص لمستخدمين معينين
+ */
+async function notifyUsers(userIds, title, message, data = {}) {
+  return sendPushNotification(title, message, userIds, data);
 }
 
 module.exports = {
@@ -99,4 +114,5 @@ module.exports = {
   notifyRequestApproved,
   notifyRequestRejected,
   notifyNewRequest,
+  notifyUsers,
 };

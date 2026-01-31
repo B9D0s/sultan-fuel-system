@@ -245,6 +245,11 @@ app.post('/api/requests', async (req, res) => {
       VALUES (${student_id}, '${committee}', '${safeDesc}', ${points}, ${weekNumber})
     `);
     const id = await getLastInsertId();
+
+    // إرسال إشعار للمشرفين والأدمن بوجود طلب جديد
+    const student = await queryOne(`SELECT name FROM users WHERE id = ${student_id}`);
+    await notifyNewRequest(student ? student.name : 'طالب');
+
     res.json({ success: true, id });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في إنشاء الطلب' });
