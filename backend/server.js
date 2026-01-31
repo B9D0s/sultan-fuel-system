@@ -205,18 +205,39 @@ app.post('/api/students/:id/points', async (req, res) => {
   }
 
   try {
+    // التأكد من وجود جدول التعديلات اليدوية
+    await run(`
+      CREATE TABLE IF NOT EXISTS points_adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        points INTEGER NOT NULL,
+        reason TEXT,
+        adjusted_by INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, false);
+
     // جلب النقاط الحالية (من الطلبات + التعديلات اليدوية)
     const requestsPoints = await queryOne(`
       SELECT COALESCE(SUM(points), 0) as total
       FROM requests
       WHERE student_id = ${req.params.id} AND status = 'approved'
     `);
-    const adjustmentsPoints = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM points_adjustments
-      WHERE student_id = ${req.params.id}
-    `);
-    const currentPoints = (requestsPoints?.total || 0) + (adjustmentsPoints?.total || 0);
+
+    let adjustmentsTotal = 0;
+    try {
+      const adjustmentsPoints = await queryOne(`
+        SELECT COALESCE(SUM(points), 0) as total
+        FROM points_adjustments
+        WHERE student_id = ${req.params.id}
+      `);
+      adjustmentsTotal = adjustmentsPoints?.total || 0;
+    } catch (e) {
+      // الجدول قد لا يكون موجوداً بعد
+      adjustmentsTotal = 0;
+    }
+
+    const currentPoints = (requestsPoints?.total || 0) + adjustmentsTotal;
 
     // التحقق من إمكانية الخصم
     if (action === 'subtract' && currentPoints < points) {
