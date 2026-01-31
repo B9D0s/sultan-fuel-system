@@ -499,6 +499,7 @@ async function renderGroupsPage() {
                     <th>#</th>
                     <th>اسم الأسرة</th>
                     <th>عدد الطلاب</th>
+                    <th>مجموع النقاط</th>
                     ${currentUser.role === 'admin' ? '<th>الإجراءات</th>' : ''}
                   </tr>
                 </thead>
@@ -508,6 +509,10 @@ async function renderGroupsPage() {
                       <td>${i + 1}</td>
                       <td>${g.name}</td>
                       <td>${g.student_count}</td>
+                      <td>
+                        <span class="fuel-indicator">${getFuelEmoji(g.total_points || 0)}</span>
+                        <span class="points-badge">${g.total_points || 0}</span>
+                      </td>
                       ${currentUser.role === 'admin' ? `
                         <td>
                           <div class="action-btns">

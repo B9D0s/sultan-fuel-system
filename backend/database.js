@@ -94,6 +94,16 @@ const createTables = async () => {
       FOREIGN KEY (student_id) REFERENCES users(id),
       FOREIGN KEY (reviewed_by) REFERENCES users(id)
     )`,
+    `CREATE TABLE IF NOT EXISTS points_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL,
+      points INTEGER NOT NULL,
+      reason TEXT,
+      adjusted_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_id) REFERENCES users(id),
+      FOREIGN KEY (adjusted_by) REFERENCES users(id)
+    )`,
     `CREATE TABLE IF NOT EXISTS notifications (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,

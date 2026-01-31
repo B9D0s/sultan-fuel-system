@@ -64,7 +64,14 @@ app.post('/api/auth/code', async (req, res) => {
 // جلب كل الأسر
 app.get('/api/groups', async (req, res) => {
   const groups = await queryAll(`
-    SELECT g.id, g.name, g.created_at, COUNT(u.id) as student_count
+    SELECT g.id, g.name, g.created_at,
+    COUNT(u.id) as student_count,
+    COALESCE(
+      (SELECT SUM(
+        COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u2.id AND status = 'approved'), 0) +
+        COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u2.id), 0)
+      ) FROM users u2 WHERE u2.group_id = g.id AND u2.role = 'student'), 0
+    ) as total_points
     FROM groups g
     LEFT JOIN users u ON g.id = u.group_id AND u.role = 'student'
     GROUP BY g.id
@@ -143,7 +150,8 @@ app.delete('/api/supervisors/:id', async (req, res) => {
 app.get('/api/students', async (req, res) => {
   const students = await queryAll(`
     SELECT u.id, u.name, u.code, u.group_id, g.name as group_name, u.created_at,
-    COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) as total_points
+    (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+     COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
     FROM users u
     LEFT JOIN groups g ON u.group_id = g.id
     WHERE u.role = 'student'
@@ -197,13 +205,18 @@ app.post('/api/students/:id/points', async (req, res) => {
   }
 
   try {
-    // جلب النقاط الحالية
-    const currentResult = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total_points
+    // جلب النقاط الحالية (من الطلبات + التعديلات اليدوية)
+    const requestsPoints = await queryOne(`
+      SELECT COALESCE(SUM(points), 0) as total
       FROM requests
       WHERE student_id = ${req.params.id} AND status = 'approved'
     `);
-    const currentPoints = currentResult.total_points || 0;
+    const adjustmentsPoints = await queryOne(`
+      SELECT COALESCE(SUM(points), 0) as total
+      FROM points_adjustments
+      WHERE student_id = ${req.params.id}
+    `);
+    const currentPoints = (requestsPoints?.total || 0) + (adjustmentsPoints?.total || 0);
 
     // التحقق من إمكانية الخصم
     if (action === 'subtract' && currentPoints < points) {
@@ -213,24 +226,18 @@ app.post('/api/students/:id/points', async (req, res) => {
       });
     }
 
-    const weekNumber = getWeekNumber();
     const actualPoints = action === 'subtract' ? -points : points;
     const safeReason = (reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي')).replace(/'/g, "''");
 
-    // إنشاء سجل تعديل النقاط
+    // إنشاء سجل تعديل النقاط في الجدول الجديد
     await run(`
-      INSERT INTO requests (student_id, committee, description, points, status, reviewed_by, reviewed_at, week_number)
-      VALUES (${req.params.id}, 'عامة', '${safeReason}', ${actualPoints}, 'approved', ${reviewer_id}, datetime('now'), ${weekNumber})
+      INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+      VALUES (${req.params.id}, ${actualPoints}, '${safeReason}', ${reviewer_id})
     `);
 
-    // جلب النقاط الجديدة
-    const newResult = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total_points
-      FROM requests
-      WHERE student_id = ${req.params.id} AND status = 'approved'
-    `);
+    // حساب النقاط الجديدة
+    const newPoints = currentPoints + actualPoints;
 
-    const newPoints = newResult.total_points;
     // تحديد نوع الوقود بناءً على النقاط (الحد الأقصى 5)
     const fuelLevel = Math.min(Math.max(newPoints, 0), 5);
     const fuelType = fuelLevel > 0 ? pointsToFuel(fuelLevel) : { name: 'لا يوجد', emoji: '⚫' };
