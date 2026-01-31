@@ -91,7 +91,21 @@ function showError(element, message) {
 function handleLoginSuccess(user) {
   currentUser = user;
   localStorage.setItem('user', JSON.stringify(user));
+
+  // ربط المستخدم بـ OneSignal للإشعارات
+  registerOneSignalUser(user.id);
+
   showDashboard();
+}
+
+// ربط المستخدم بـ OneSignal
+function registerOneSignalUser(userId) {
+  if (typeof OneSignal !== 'undefined') {
+    OneSignalDeferred.push(async function(OneSignal) {
+      await OneSignal.login(String(userId));
+      console.log('✅ تم ربط المستخدم بـ OneSignal:', userId);
+    });
+  }
 }
 
 function checkStoredSession() {

@@ -37,6 +37,42 @@
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="css/style.css">
+
+  <!-- OneSignal SDK -->
+  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+  <script>
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    OneSignalDeferred.push(async function(OneSignal) {
+      await OneSignal.init({
+        appId: "31ae51d1-51bc-406b-8c05-3cc577d100b0",
+        notifyButton: {
+          enable: true,
+          size: 'medium',
+          position: 'bottom-left',
+          prenotify: true,
+          showCredit: false,
+          text: {
+            'tip.state.unsubscribed': 'اشترك للحصول على الإشعارات',
+            'tip.state.subscribed': 'أنت مشترك في الإشعارات',
+            'tip.state.blocked': 'لقد حظرت الإشعارات',
+            'message.prenotify': 'اضغط للاشتراك في الإشعارات',
+            'message.action.subscribed': 'شكراً للاشتراك!',
+            'message.action.resubscribed': 'أنت مشترك في الإشعارات',
+            'message.action.unsubscribed': 'لن تستلم إشعارات بعد الآن',
+            'dialog.main.title': 'إدارة إشعارات الموقع',
+            'dialog.main.button.subscribe': 'اشتراك',
+            'dialog.main.button.unsubscribe': 'إلغاء الاشتراك',
+            'dialog.blocked.title': 'إلغاء حظر الإشعارات',
+            'dialog.blocked.message': 'اتبع هذه التعليمات للسماح بالإشعارات:'
+          }
+        },
+        welcomeNotification: {
+          title: 'طاقات السلطان ⛽',
+          message: 'شكراً لاشتراكك! ستصلك الإشعارات عند قبول أو رفض طلباتك.'
+        }
+      });
+    });
+  </script>
 </head>
 <body>
   <!-- صفحة تسجيل الدخول -->

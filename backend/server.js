@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId } = require('./database');
 const PDFDocument = require('pdfkit');
+const { notifyRequestApproved, notifyRequestRejected, notifyNewRequest } = require('./notifications');
 
 // مسار الخط العربي
 const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
@@ -268,6 +269,9 @@ app.post('/api/requests/:id/approve', async (req, res) => {
       VALUES (${request.student_id}, 'تم قبول طلبك ✅', 'حصلت على 1 لتر ${fuel.name} ${fuel.emoji}')
     `);
 
+    // إرسال Push Notification
+    await notifyRequestApproved(request.student_id, fuel.name, fuel.emoji);
+
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ' });
@@ -292,6 +296,9 @@ app.post('/api/requests/:id/reject', async (req, res) => {
       INSERT INTO notifications (user_id, title, message)
       VALUES (${request.student_id}, 'تم رفض طلبك ❌', '${message.replace(/'/g, "''")}')
     `);
+
+    // إرسال Push Notification
+    await notifyRequestRejected(request.student_id, rejection_reason);
 
     res.json({ success: true });
   } catch (error) {
