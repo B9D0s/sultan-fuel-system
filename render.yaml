@@ -1,0 +1,15 @@
+# Render Blueprint for Sultan Fuel System
+# Using Turso Cloud Database (Free tier)
+services:
+  - type: web
+    name: sultan-fuel-system
+    env: node
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TURSO_DATABASE_URL
+        sync: false  # Set manually in Render dashboard
+      - key: TURSO_AUTH_TOKEN
+        sync: false  # Set manually in Render dashboard
