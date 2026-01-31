@@ -14,6 +14,14 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Service Worker header
+app.get('/sw.js', (req, res) => {
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.setHeader('Content-Type', 'application/javascript');
+  res.sendFile(path.join(__dirname, '../frontend/sw.js'));
+});
+
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ==================== Auth Routes ====================
