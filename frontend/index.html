@@ -56,6 +56,17 @@
 
   <!-- لوحة التحكم -->
   <div id="dashboard" class="dashboard" style="display: none;">
+    <!-- Mobile Header -->
+    <header class="mobile-header" id="mobile-header">
+      <h1>⛽ طاقات السلطان</h1>
+      <div class="mobile-header-actions">
+        <button class="notification-btn" onclick="toggleNotifications()">
+          <i class="fas fa-bell"></i>
+          <span class="notification-badge" id="mobile-notif-badge" style="display: none;">0</span>
+        </button>
+      </div>
+    </header>
+
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
@@ -78,6 +89,13 @@
     <main class="main-content" id="main-content">
       <!-- سيتم ملؤه بالجافاسكربت -->
     </main>
+
+    <!-- Mobile Bottom Navigation -->
+    <nav class="mobile-nav" id="mobile-nav">
+      <div class="mobile-nav-items" id="mobile-nav-items">
+        <!-- سيتم ملؤها بالجافاسكربت حسب نوع المستخدم -->
+      </div>
+    </nav>
   </div>
 
   <!-- لوحة الإشعارات -->

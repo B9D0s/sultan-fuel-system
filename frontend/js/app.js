@@ -118,6 +118,7 @@ function showDashboard() {
   dashboard.style.display = 'flex';
   userName.textContent = `مرحباً، ${currentUser.name}`;
   buildSidebar();
+  buildMobileNav();
   navigateTo('dashboard');
 }
 
@@ -185,7 +186,110 @@ function buildSidebar() {
       document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
       item.classList.add('active');
       navigateTo(item.dataset.page);
+      // Update mobile nav too
+      updateMobileNavActive(item.dataset.page);
     });
+  });
+}
+
+// ==================== Mobile Navigation ====================
+function buildMobileNav() {
+  const mobileNavItems = document.getElementById('mobile-nav-items');
+  let navItems = '';
+
+  if (currentUser.role === 'admin') {
+    navItems = `
+      <button class="mobile-nav-item active" data-page="dashboard">
+        <i class="fas fa-home"></i>
+        <span>الرئيسية</span>
+      </button>
+      <button class="mobile-nav-item" data-page="groups">
+        <i class="fas fa-users"></i>
+        <span>الأسر</span>
+      </button>
+      <button class="mobile-nav-item" data-page="students">
+        <i class="fas fa-user-graduate"></i>
+        <span>الطلاب</span>
+      </button>
+      <button class="mobile-nav-item" data-page="requests">
+        <i class="fas fa-clipboard-list"></i>
+        <span>الطلبات</span>
+      </button>
+      <button class="mobile-nav-item" onclick="logout()">
+        <i class="fas fa-sign-out-alt"></i>
+        <span>خروج</span>
+      </button>
+    `;
+  } else if (currentUser.role === 'supervisor') {
+    navItems = `
+      <button class="mobile-nav-item active" data-page="dashboard">
+        <i class="fas fa-home"></i>
+        <span>الرئيسية</span>
+      </button>
+      <button class="mobile-nav-item" data-page="students">
+        <i class="fas fa-user-graduate"></i>
+        <span>الطلاب</span>
+      </button>
+      <button class="mobile-nav-item" data-page="requests">
+        <i class="fas fa-clipboard-list"></i>
+        <span>الطلبات</span>
+      </button>
+      <button class="mobile-nav-item" onclick="logout()">
+        <i class="fas fa-sign-out-alt"></i>
+        <span>خروج</span>
+      </button>
+    `;
+  } else {
+    // Student
+    navItems = `
+      <button class="mobile-nav-item active" data-page="dashboard">
+        <i class="fas fa-gas-pump"></i>
+        <span>رصيدي</span>
+      </button>
+      <button class="mobile-nav-item" data-page="new-request">
+        <i class="fas fa-plus-circle"></i>
+        <span>طلب جديد</span>
+      </button>
+      <button class="mobile-nav-item" data-page="my-requests">
+        <i class="fas fa-history"></i>
+        <span>طلباتي</span>
+      </button>
+      <button class="mobile-nav-item" onclick="logout()">
+        <i class="fas fa-sign-out-alt"></i>
+        <span>خروج</span>
+      </button>
+    `;
+  }
+
+  mobileNavItems.innerHTML = navItems;
+
+  // Add click events for mobile nav
+  document.querySelectorAll('.mobile-nav-item[data-page]').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.mobile-nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      navigateTo(item.dataset.page);
+      // Update sidebar nav too
+      updateSidebarActive(item.dataset.page);
+    });
+  });
+}
+
+function updateMobileNavActive(page) {
+  document.querySelectorAll('.mobile-nav-item').forEach(item => {
+    item.classList.remove('active');
+    if (item.dataset.page === page) {
+      item.classList.add('active');
+    }
+  });
+}
+
+function updateSidebarActive(page) {
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.classList.remove('active');
+    if (item.dataset.page === page) {
+      item.classList.add('active');
+    }
   });
 }
 
