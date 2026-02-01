@@ -952,7 +952,7 @@ async function addPoints(studentId) {
   const reason = document.getElementById('points-reason').value;
 
   try {
-    const response = await fetch(`${API_BASE}/students/${studentId}/points`, {
+    const response = await fetch(`${API_URL}/students/${studentId}/points`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -982,7 +982,7 @@ async function subtractPoints(studentId) {
   const reason = document.getElementById('points-reason').value;
 
   try {
-    const response = await fetch(`${API_BASE}/students/${studentId}/points`, {
+    const response = await fetch(`${API_URL}/students/${studentId}/points`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
