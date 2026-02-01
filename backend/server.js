@@ -288,8 +288,8 @@ app.post('/api/students/:id/points', async (req, res) => {
       fuel_emoji: fuelType.emoji
     });
   } catch (error) {
-    console.error('خطأ في تعديل النقاط:', error);
-    res.status(400).json({ success: false, message: 'حدث خطأ في تعديل النقاط' });
+    console.error('خطأ في تعديل النقاط:', error.message, error.stack);
+    res.status(400).json({ success: false, message: 'حدث خطأ في تعديل النقاط: ' + error.message });
   }
 });
 
