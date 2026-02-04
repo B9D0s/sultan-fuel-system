@@ -997,7 +997,8 @@ tr:hover {
 }
 
 /* ==================== Responsive ==================== */
-@media (max-width: 768px) {
+/* تغطية جميع الأجهزة المحمولة والتابلت */
+@media (max-width: 1024px) {
   .mobile-nav {
     display: block;
   }
@@ -1006,7 +1007,7 @@ tr:hover {
     display: flex;
   }
 
-  /* إخفاء الـ Sidebar تماماً على الجوال */
+  /* إخفاء الـ Sidebar تماماً على الجوال والتابلت */
   .sidebar {
     display: none !important;
   }
@@ -1282,7 +1283,7 @@ tr:hover {
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 1024px) {
   .install-banner {
     bottom: 100px;
     left: 10px;
@@ -1580,7 +1581,7 @@ input:checked + .slider:before {
 }
 
 /* ==================== Improved Mobile Responsive ==================== */
-@media (max-width: 768px) {
+@media (max-width: 1024px) {
   /* تحسين عرض الخزانات */
   .fuel-tanks-container {
     padding: 20px 10px;
@@ -1677,35 +1678,6 @@ input:checked + .slider:before {
     width: 100%;
   }
 
-}
-
-/* ==================== iPad / Tablet Responsive ==================== */
-@media (min-width: 769px) and (max-width: 1024px) {
-  .sidebar {
-    width: 220px;
-  }
-
-  .main-content {
-    margin-right: 220px;
-    padding: 20px;
-  }
-
-  .fuel-tanks-container {
-    gap: 20px;
-  }
-
-  .tank-wrapper {
-    width: 70px;
-    height: 170px;
-  }
-
-  .stats-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .group-points-summary {
-    gap: 15px;
-  }
 }
 
 /* ==================== Touch Improvements ==================== */
