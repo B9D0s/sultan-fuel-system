@@ -62,6 +62,14 @@ const initLocalDatabase = async () => {
 
 // إنشاء الجداول
 const createTables = async () => {
+  // إضافة عمود points_hidden إذا لم يكن موجوداً (migration)
+  try {
+    await run(`ALTER TABLE users ADD COLUMN points_hidden INTEGER DEFAULT 0`, false);
+    console.log('✅ تم إضافة عمود points_hidden');
+  } catch (e) {
+    // العمود موجود بالفعل، تجاهل الخطأ
+  }
+
   const tables = [
     `CREATE TABLE IF NOT EXISTS groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,6 +84,7 @@ const createTables = async () => {
       password TEXT,
       role TEXT NOT NULL CHECK(role IN ('admin', 'supervisor', 'student')),
       group_id INTEGER,
+      points_hidden INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (group_id) REFERENCES groups(id)
     )`,

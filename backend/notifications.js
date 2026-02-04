@@ -142,6 +142,74 @@ async function notifyPointsSubtracted(studentId, points, newTotal, fuelName, fue
   );
 }
 
+/**
+ * إشعار منع/إلغاء منع رؤية النقاط
+ */
+async function notifyPointsVisibilityChanged(studentId, isHidden, reason = '') {
+  const title = isHidden ? 'تم إخفاء نقاطك 🚫' : 'تم إظهار نقاطك ✅';
+  const message = isHidden
+    ? `تم منعك من رؤية نقاطك مؤقتاً${reason ? '\nالسبب: ' + reason : ''}`
+    : 'يمكنك الآن رؤية نقاطك مرة أخرى';
+
+  return sendPushNotification(title, message, studentId, { type: 'points_visibility_changed' });
+}
+
+/**
+ * إشعار إضافة طالب جديد
+ */
+async function notifyNewStudent(studentId, studentName, code) {
+  return sendPushNotification(
+    'مرحباً بك في نظام سلطان! 🎉',
+    `أهلاً ${studentName}! رمز دخولك هو: ${code}`,
+    studentId,
+    { type: 'new_student' }
+  );
+}
+
+/**
+ * إشعار تغيير أسرة الطالب
+ */
+async function notifyGroupChanged(studentId, newGroupName, oldGroupName = null) {
+  const message = oldGroupName
+    ? `تم نقلك من أسرة "${oldGroupName}" إلى أسرة "${newGroupName}"`
+    : `تم إضافتك إلى أسرة "${newGroupName}"`;
+
+  return sendPushNotification(
+    'تغيير الأسرة 👥',
+    message,
+    studentId,
+    { type: 'group_changed' }
+  );
+}
+
+/**
+ * إشعار الوصول للحد الأسبوعي
+ */
+async function notifyWeeklyLimitReached(studentId) {
+  return sendPushNotification(
+    'وصلت للحد الأسبوعي ⚠️',
+    'لقد وصلت للحد الأقصى من الطلبات هذا الأسبوع (20 طلب). انتظر الأسبوع القادم!',
+    studentId,
+    { type: 'weekly_limit_reached' }
+  );
+}
+
+/**
+ * إشعار للمشرفين بإضافة طالب جديد
+ */
+async function notifyNewStudentToSupervisors(studentName, groupName, supervisorIds = [], adminIds = []) {
+  const targetIds = [...supervisorIds, ...adminIds];
+  if (targetIds.length === 0) return { success: false };
+
+  const groupText = groupName ? ` في أسرة "${groupName}"` : '';
+  return sendPushNotification(
+    'طالب جديد 🆕',
+    `تم إضافة الطالب "${studentName}"${groupText}`,
+    targetIds,
+    { type: 'new_student_admin' }
+  );
+}
+
 module.exports = {
   sendPushNotification,
   notifyRequestApproved,
@@ -150,4 +218,9 @@ module.exports = {
   notifyUsers,
   notifyPointsAdded,
   notifyPointsSubtracted,
+  notifyPointsVisibilityChanged,
+  notifyNewStudent,
+  notifyGroupChanged,
+  notifyWeeklyLimitReached,
+  notifyNewStudentToSupervisors,
 };

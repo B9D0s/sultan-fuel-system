@@ -348,6 +348,9 @@ async function renderStudentDashboard() {
   try {
     const stats = await StatsAPI.getStudentStats(currentUser.id);
 
+    // التحقق إذا كانت النقاط مخفية
+    const isPointsHidden = currentUser.points_hidden === 1 || currentUser.points_hidden === true;
+
     mainContent.innerHTML = `
       <div class="page-header">
         <h1><i class="fas fa-gas-pump"></i> رصيدي من الوقود</h1>
@@ -370,21 +373,33 @@ async function renderStudentDashboard() {
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-header">
-          <h2>خزانات الوقود</h2>
-          <span>المجموع: ${stats.totalLiters} لتر</span>
-        </div>
-        <div class="card-body">
-          <div class="fuel-tanks-container">
-            ${renderFuelTank('ديزل', stats.fuel.diesel, 'diesel', '#8B7355')}
-            ${renderFuelTank('91', stats.fuel.fuel91, 'fuel91', '#22c55e')}
-            ${renderFuelTank('95', stats.fuel.fuel95, 'fuel95', '#ef4444')}
-            ${renderFuelTank('98', stats.fuel.fuel98, 'fuel98', '#e5e5e5')}
-            ${renderFuelTank('إيثانول', stats.fuel.ethanol, 'ethanol', '#3b82f6')}
+      ${isPointsHidden ? `
+        <div class="card points-hidden-card">
+          <div class="card-body">
+            <div class="points-hidden-message">
+              <i class="fas fa-eye-slash"></i>
+              <h3>تم إخفاء نقاطك مؤقتاً</h3>
+              <p>لا يمكنك رؤية نقاطك حالياً. تواصل مع المشرف لمزيد من المعلومات.</p>
+            </div>
           </div>
         </div>
-      </div>
+      ` : `
+        <div class="card">
+          <div class="card-header">
+            <h2>خزانات الوقود</h2>
+            <span>المجموع: ${stats.totalLiters} لتر</span>
+          </div>
+          <div class="card-body">
+            <div class="fuel-tanks-container">
+              ${renderFuelTank('ديزل', stats.fuel.diesel, 'diesel', '#8B7355')}
+              ${renderFuelTank('91', stats.fuel.fuel91, 'fuel91', '#22c55e')}
+              ${renderFuelTank('95', stats.fuel.fuel95, 'fuel95', '#ef4444')}
+              ${renderFuelTank('98', stats.fuel.fuel98, 'fuel98', '#e5e5e5')}
+              ${renderFuelTank('إيثانول', stats.fuel.ethanol, 'ethanol', '#3b82f6')}
+            </div>
+          </div>
+        </div>
+      `}
     `;
 
     updateNotificationBadge();
@@ -761,6 +776,11 @@ async function renderStudentsPage() {
                       ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
                         <td>
                           <div class="action-btns">
+                            <button class="action-btn ${s.points_hidden ? 'visibility-off' : 'visibility-on'}"
+                                    onclick="togglePointsVisibility(${s.id}, ${!s.points_hidden}, '${s.name}')"
+                                    title="${s.points_hidden ? 'إظهار النقاط' : 'إخفاء النقاط'}">
+                              <i class="fas fa-${s.points_hidden ? 'eye-slash' : 'eye'}"></i>
+                            </button>
                             ${currentUser.role === 'admin' ? `
                               <button class="action-btn edit" onclick='showEditStudentModal(${JSON.stringify(s)})'>
                                 <i class="fas fa-edit"></i>
@@ -1014,6 +1034,37 @@ function updateStudentPoints(studentId, newPoints) {
 
   if (pointsEl) pointsEl.textContent = newPoints;
   if (fuelEl) fuelEl.textContent = getFuelEmoji(newPoints);
+}
+
+// تبديل حالة إخفاء/إظهار النقاط
+async function togglePointsVisibility(studentId, hide, studentName) {
+  const action = hide ? 'إخفاء' : 'إظهار';
+  let reason = '';
+
+  if (hide) {
+    reason = prompt(`سبب ${action} النقاط للطالب ${studentName} (اختياري):`);
+    if (reason === null) return; // المستخدم ضغط إلغاء
+  }
+
+  if (!confirm(`هل تريد ${action} النقاط للطالب ${studentName}؟`)) return;
+
+  try {
+    const response = await fetch(`${API_BASE}/students/${studentId}/toggle-points-visibility`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden: hide, reason })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      alert(`تم ${action} النقاط بنجاح وإرسال إشعار للطالب`);
+      renderStudentsPage();
+    } else {
+      alert(data.message || 'حدث خطأ');
+    }
+  } catch (error) {
+    alert('حدث خطأ في الاتصال');
+  }
 }
 
 // ==================== Requests Page ====================

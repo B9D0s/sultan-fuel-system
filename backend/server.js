@@ -4,7 +4,18 @@ const path = require('path');
 const fs = require('fs');
 const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId } = require('./database');
 const PDFDocument = require('pdfkit');
-const { notifyRequestApproved, notifyRequestRejected, notifyNewRequest, notifyPointsAdded, notifyPointsSubtracted } = require('./notifications');
+const {
+  notifyRequestApproved,
+  notifyRequestRejected,
+  notifyNewRequest,
+  notifyPointsAdded,
+  notifyPointsSubtracted,
+  notifyPointsVisibilityChanged,
+  notifyNewStudent,
+  notifyGroupChanged,
+  notifyWeeklyLimitReached,
+  notifyNewStudentToSupervisors
+} = require('./notifications');
 
 // مسار الخط العربي
 const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
@@ -46,7 +57,7 @@ app.post('/api/auth/admin', async (req, res) => {
 app.post('/api/auth/code', async (req, res) => {
   const { code } = req.body;
   const user = await queryOne(`
-    SELECT u.id, u.name, u.role, u.group_id, g.name as group_name
+    SELECT u.id, u.name, u.role, u.group_id, g.name as group_name, COALESCE(u.points_hidden, 0) as points_hidden
     FROM users u
     LEFT JOIN groups g ON u.group_id = g.id
     WHERE u.code = '${code}'
@@ -150,6 +161,7 @@ app.delete('/api/supervisors/:id', async (req, res) => {
 app.get('/api/students', async (req, res) => {
   const students = await queryAll(`
     SELECT u.id, u.name, u.code, u.group_id, g.name as group_name, u.created_at,
+    COALESCE(u.points_hidden, 0) as points_hidden,
     (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
      COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
     FROM users u
@@ -167,6 +179,28 @@ app.post('/api/students', async (req, res) => {
     const groupVal = group_id ? group_id : 'NULL';
     await run(`INSERT INTO users (name, code, role, group_id) VALUES ('${name}', '${code}', 'student', ${groupVal})`);
     const id = await getLastInsertId();
+
+    // جلب اسم الأسرة إذا وجدت
+    let groupName = null;
+    if (group_id) {
+      const group = await queryOne(`SELECT name FROM groups WHERE id = ${group_id}`);
+      groupName = group ? group.name : null;
+    }
+
+    // إرسال إشعار للطالب الجديد
+    await notifyNewStudent(id, name, code);
+
+    // إنشاء إشعار ترحيبي في قاعدة البيانات
+    await run(`
+      INSERT INTO notifications (user_id, title, message)
+      VALUES (${id}, 'مرحباً بك في نظام سلطان! 🎉', 'أهلاً ${name}! رمز دخولك هو: ${code}')
+    `);
+
+    // إشعار المشرفين والأدمن
+    const supervisors = await queryAll(`SELECT id FROM users WHERE role = 'supervisor'`);
+    const admins = await queryAll(`SELECT id FROM users WHERE role = 'admin'`);
+    await notifyNewStudentToSupervisors(name, groupName, supervisors.map(s => s.id), admins.map(a => a.id));
+
     res.json({ success: true, id, code });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الإنشاء' });
@@ -177,8 +211,40 @@ app.post('/api/students', async (req, res) => {
 app.put('/api/students/:id', async (req, res) => {
   const { name, group_id } = req.body;
   try {
+    // جلب بيانات الطالب الحالية
+    const currentStudent = await queryOne(`
+      SELECT u.group_id, g.name as group_name
+      FROM users u
+      LEFT JOIN groups g ON u.group_id = g.id
+      WHERE u.id = ${req.params.id}
+    `);
+
     const groupVal = group_id ? group_id : 'NULL';
     await run(`UPDATE users SET name = '${name}', group_id = ${groupVal} WHERE id = ${req.params.id}`);
+
+    // إذا تغيرت الأسرة، أرسل إشعار
+    if (currentStudent && String(currentStudent.group_id) !== String(group_id)) {
+      let newGroupName = null;
+      if (group_id) {
+        const newGroup = await queryOne(`SELECT name FROM groups WHERE id = ${group_id}`);
+        newGroupName = newGroup ? newGroup.name : null;
+      }
+
+      if (newGroupName) {
+        await notifyGroupChanged(req.params.id, newGroupName, currentStudent.group_name);
+
+        // إنشاء إشعار في قاعدة البيانات
+        const message = currentStudent.group_name
+          ? `تم نقلك من أسرة "${currentStudent.group_name}" إلى أسرة "${newGroupName}"`
+          : `تم إضافتك إلى أسرة "${newGroupName}"`;
+
+        await run(`
+          INSERT INTO notifications (user_id, title, message)
+          VALUES (${req.params.id}, 'تغيير الأسرة 👥', '${message.replace(/'/g, "''")}')
+        `);
+      }
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في التعديل' });
@@ -293,6 +359,38 @@ app.post('/api/students/:id/points', async (req, res) => {
   }
 });
 
+// تبديل حالة إخفاء النقاط للطالب
+app.post('/api/students/:id/toggle-points-visibility', async (req, res) => {
+  const { hidden, reason } = req.body;
+
+  try {
+    // تحديث حالة إخفاء النقاط
+    await run(`UPDATE users SET points_hidden = ${hidden ? 1 : 0} WHERE id = ${req.params.id}`);
+
+    // جلب اسم الطالب
+    const student = await queryOne(`SELECT name FROM users WHERE id = ${req.params.id}`);
+
+    // إرسال إشعار للطالب
+    await notifyPointsVisibilityChanged(req.params.id, hidden, reason);
+
+    // إنشاء إشعار في قاعدة البيانات
+    const notifTitle = hidden ? 'تم إخفاء نقاطك 🚫' : 'تم إظهار نقاطك ✅';
+    const notifMessage = hidden
+      ? `تم منعك من رؤية نقاطك مؤقتاً${reason ? '. السبب: ' + reason : ''}`
+      : 'يمكنك الآن رؤية نقاطك مرة أخرى';
+
+    await run(`
+      INSERT INTO notifications (user_id, title, message)
+      VALUES (${req.params.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
+    `);
+
+    res.json({ success: true, points_hidden: hidden });
+  } catch (error) {
+    console.error('خطأ في تغيير حالة إخفاء النقاط:', error);
+    res.status(400).json({ success: false, message: 'حدث خطأ' });
+  }
+});
+
 // ==================== Requests Routes ====================
 
 // جلب طلبات طالب معين
@@ -363,6 +461,16 @@ app.post('/api/requests', async (req, res) => {
     const adminIds = admins.map(a => a.id);
 
     await notifyNewRequest(student ? student.name : 'طالب', supervisorIds, adminIds);
+
+    // التحقق إذا وصل للحد الأسبوعي بعد هذا الطلب
+    const newCount = (currentWeekRequests?.count || 0) + 1;
+    if (newCount >= 20) {
+      await notifyWeeklyLimitReached(student_id);
+      await run(`
+        INSERT INTO notifications (user_id, title, message)
+        VALUES (${student_id}, 'وصلت للحد الأسبوعي ⚠️', 'لقد وصلت للحد الأقصى من الطلبات هذا الأسبوع (20 طلب). انتظر الأسبوع القادم!')
+      `);
+    }
 
     res.json({ success: true, id });
   } catch (error) {

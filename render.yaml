@@ -13,3 +13,7 @@ services:
         sync: false  # Set manually in Render dashboard
       - key: TURSO_AUTH_TOKEN
         sync: false  # Set manually in Render dashboard
+      - key: ONESIGNAL_APP_ID
+        sync: false  # Set manually in Render dashboard
+      - key: ONESIGNAL_API_KEY
+        sync: false  # Set manually in Render dashboard
