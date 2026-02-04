@@ -642,6 +642,26 @@ tr:hover {
   color: var(--white);
 }
 
+.action-btn.visibility-on {
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--success);
+}
+
+.action-btn.visibility-on:hover {
+  background: var(--success);
+  color: var(--white);
+}
+
+.action-btn.visibility-off {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--warning);
+}
+
+.action-btn.visibility-off:hover {
+  background: var(--warning);
+  color: var(--white);
+}
+
 /* ==================== Points Badge & Actions ==================== */
 .points-cell {
   display: flex;
@@ -870,6 +890,33 @@ tr:hover {
   margin-top: 8px;
 }
 
+/* ==================== Points Hidden Message ==================== */
+.points-hidden-card {
+  border: 2px dashed var(--warning);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.points-hidden-message {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--warning);
+}
+
+.points-hidden-message i {
+  font-size: 4rem;
+  margin-bottom: 20px;
+  opacity: 0.7;
+}
+
+.points-hidden-message h3 {
+  margin-bottom: 10px;
+  color: var(--text-dark);
+}
+
+.points-hidden-message p {
+  color: var(--text-gray);
+}
+
 /* ==================== Empty State ==================== */
 .empty-state {
   text-align: center;
@@ -1085,6 +1132,69 @@ tr:hover {
   /* تحسين لوحة الإشعارات */
   .notifications-panel {
     width: 100%;
+  }
+
+  /* تحسين عرض النقاط */
+  .points-cell {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+  }
+
+  .points-actions {
+    margin-top: 5px;
+  }
+
+  .fuel-indicator {
+    font-size: 1.2rem;
+  }
+
+  .points-badge {
+    font-size: 0.8rem;
+    padding: 3px 8px;
+  }
+
+  /* تحسين رسالة إخفاء النقاط */
+  .points-hidden-message {
+    padding: 30px 15px;
+  }
+
+  .points-hidden-message i {
+    font-size: 3rem;
+  }
+
+  /* تحسين نموذج طلب جديد */
+  .form-group textarea {
+    min-height: 100px;
+  }
+
+  /* تحسين select */
+  .form-group select {
+    font-size: 16px; /* لمنع zoom على iOS */
+  }
+
+  .form-group input {
+    font-size: 16px;
+  }
+
+  /* تحسين عرض الأسبوع */
+  .weekly-progress {
+    padding: 15px;
+  }
+
+  .weekly-progress h3 {
+    font-size: 0.95rem;
+  }
+
+  /* تحسين الأزرار */
+  .btn {
+    padding: 12px;
+    font-size: 0.95rem;
+  }
+
+  .btn-small {
+    padding: 8px 12px;
+    font-size: 0.8rem;
   }
 }
 
