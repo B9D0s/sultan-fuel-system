@@ -62,14 +62,6 @@ const initLocalDatabase = async () => {
 
 // إنشاء الجداول
 const createTables = async () => {
-  // إضافة عمود points_hidden إذا لم يكن موجوداً (migration)
-  try {
-    await run(`ALTER TABLE users ADD COLUMN points_hidden INTEGER DEFAULT 0`, false);
-    console.log('✅ تم إضافة عمود points_hidden');
-  } catch (e) {
-    // العمود موجود بالفعل، تجاهل الخطأ
-  }
-
   const tables = [
     `CREATE TABLE IF NOT EXISTS groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +76,6 @@ const createTables = async () => {
       password TEXT,
       role TEXT NOT NULL CHECK(role IN ('admin', 'supervisor', 'student')),
       group_id INTEGER,
-      points_hidden INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (group_id) REFERENCES groups(id)
     )`,
@@ -121,6 +112,37 @@ const createTables = async () => {
       is_read INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS group_points_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      points INTEGER NOT NULL,
+      percentage REAL,
+      is_percentage INTEGER DEFAULT 0,
+      apply_to_members INTEGER DEFAULT 0,
+      reason TEXT,
+      adjusted_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (group_id) REFERENCES groups(id),
+      FOREIGN KEY (adjusted_by) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT UNIQUE NOT NULL,
+      value TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS points_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operation_type TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      group_id INTEGER,
+      points INTEGER,
+      percentage REAL,
+      reason TEXT,
+      performed_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`
   ];
 

@@ -4,18 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId } = require('./database');
 const PDFDocument = require('pdfkit');
-const {
-  notifyRequestApproved,
-  notifyRequestRejected,
-  notifyNewRequest,
-  notifyPointsAdded,
-  notifyPointsSubtracted,
-  notifyPointsVisibilityChanged,
-  notifyNewStudent,
-  notifyGroupChanged,
-  notifyWeeklyLimitReached,
-  notifyNewStudentToSupervisors
-} = require('./notifications');
+const { notifyRequestApproved, notifyRequestRejected, notifyNewRequest, notifyPointsAdded, notifyPointsSubtracted } = require('./notifications');
 
 // مسار الخط العربي
 const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
@@ -57,7 +46,7 @@ app.post('/api/auth/admin', async (req, res) => {
 app.post('/api/auth/code', async (req, res) => {
   const { code } = req.body;
   const user = await queryOne(`
-    SELECT u.id, u.name, u.role, u.group_id, g.name as group_name, COALESCE(u.points_hidden, 0) as points_hidden
+    SELECT u.id, u.name, u.role, u.group_id, g.name as group_name
     FROM users u
     LEFT JOIN groups g ON u.group_id = g.id
     WHERE u.code = '${code}'
@@ -76,17 +65,35 @@ app.post('/api/auth/code', async (req, res) => {
 app.get('/api/groups', async (req, res) => {
   const groups = await queryAll(`
     SELECT g.id, g.name, g.created_at,
-    COUNT(u.id) as student_count,
-    COALESCE(
-      (SELECT SUM(
-        COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u2.id AND status = 'approved'), 0) +
-        COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u2.id), 0)
-      ) FROM users u2 WHERE u2.group_id = g.id AND u2.role = 'student'), 0
-    ) as total_points
+    COUNT(DISTINCT u.id) as student_count
     FROM groups g
     LEFT JOIN users u ON g.id = u.group_id AND u.role = 'student'
     GROUP BY g.id
   `);
+
+  // حساب نقاط كل أسرة
+  for (let group of groups) {
+    // نقاط الأفراد (من الطلبات + التعديلات الفردية)
+    const membersPoints = await queryOne(`
+      SELECT COALESCE(SUM(
+        COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+        COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)
+      ), 0) as total
+      FROM users u WHERE u.group_id = ${group.id} AND u.role = 'student'
+    `);
+
+    // نقاط الأسرة المباشرة
+    const groupDirectPoints = await queryOne(`
+      SELECT COALESCE(SUM(points), 0) as total
+      FROM group_points_adjustments
+      WHERE group_id = ${group.id}
+    `);
+
+    group.members_points = membersPoints?.total || 0;
+    group.direct_points = groupDirectPoints?.total || 0;
+    group.total_points = group.members_points + group.direct_points;
+  }
+
   res.json(groups);
 });
 
@@ -110,6 +117,295 @@ app.put('/api/groups/:id', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في التعديل' });
+  }
+});
+
+// جلب تفاصيل أسرة واحدة مع الخزانات
+app.get('/api/groups/:id/details', async (req, res) => {
+  try {
+    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    if (!group) {
+      return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
+    }
+
+    // جلب أعضاء الأسرة
+    const members = await queryAll(`
+      SELECT u.id, u.name,
+      (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+       COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
+      FROM users u WHERE u.group_id = ${req.params.id} AND u.role = 'student'
+    `);
+
+    // جلب نقاط الطلبات المقبولة لأعضاء الأسرة
+    const membersRequestsSum = await queryOne(`
+      SELECT COALESCE(SUM(r.points), 0) as total
+      FROM requests r
+      JOIN users u ON r.student_id = u.id
+      WHERE u.group_id = ${req.params.id} AND r.status = 'approved'
+    `);
+
+    // جلب مجموع التعديلات اليدوية لجميع أعضاء الأسرة
+    const membersAdjustmentsSum = await queryOne(`
+      SELECT COALESCE(SUM(pa.points), 0) as total
+      FROM points_adjustments pa
+      JOIN users u ON pa.student_id = u.id
+      WHERE u.group_id = ${req.params.id}
+    `);
+
+    // نقاط الأسرة المباشرة
+    const directAdjustmentsSum = await queryOne(`
+      SELECT COALESCE(SUM(points), 0) as total
+      FROM group_points_adjustments
+      WHERE group_id = ${req.params.id}
+    `);
+
+    const membersRequestsTotal = membersRequestsSum?.total || 0;
+    const membersAdjTotal = membersAdjustmentsSum?.total || 0;
+    const directTotal = directAdjustmentsSum?.total || 0;
+
+    // مجموع نقاط الأفراد (طلبات + تعديلات)
+    const membersPointsTotal = membersRequestsTotal + membersAdjTotal;
+
+    // المجموع الكلي للأسرة
+    const grandTotal = membersPointsTotal + directTotal;
+
+    // توزيع المجموع الكلي على الخزانات
+    const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+
+    if (grandTotal > 0) {
+      let remaining = grandTotal;
+      while (remaining > 0) {
+        if (remaining >= 5) { fuel.ethanol++; remaining -= 5; }
+        else if (remaining >= 4) { fuel.fuel98++; remaining -= 4; }
+        else if (remaining >= 3) { fuel.fuel95++; remaining -= 3; }
+        else if (remaining >= 2) { fuel.fuel91++; remaining -= 2; }
+        else { fuel.diesel++; remaining -= 1; }
+      }
+    }
+    // إذا كان سالب، الخزانات تبقى فارغة
+
+    res.json({
+      ...group,
+      members,
+      fuel,
+      members_points: membersPointsTotal,
+      direct_points: directTotal,
+      total_points: membersPointsTotal + directTotal
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// إضافة/خصم نقاط للأسرة مباشرة
+app.post('/api/groups/:id/points', async (req, res) => {
+  const { points, action, reason, apply_to_members, reviewer_id } = req.body;
+
+  if (!points || points < 1) {
+    return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
+  }
+
+  try {
+    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    if (!group) {
+      return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
+    }
+
+    const actualPoints = action === 'subtract' ? -points : points;
+    const safeReason = (reason || (action === 'add' ? 'إضافة نقاط للأسرة' : 'خصم نقاط من الأسرة')).replace(/'/g, "''");
+
+    // إذا كان الخيار توزيع على الأفراد - نضيف للأفراد (والباقي للأسرة مباشرة)
+    if (apply_to_members) {
+      const members = await queryAll(`
+        SELECT id, name FROM users WHERE group_id = ${req.params.id} AND role = 'student'
+      `);
+
+      if (members.length === 0) {
+        return res.status(400).json({ success: false, message: 'لا يوجد أعضاء في هذه الأسرة' });
+      }
+
+      const pointsPerMember = Math.floor(points / members.length);
+      const remainder = points % members.length; // الباقي الذي لا يقبل القسمة
+
+      if (pointsPerMember >= 1) {
+        for (const member of members) {
+          await run(`
+            INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+            VALUES (${member.id}, ${action === 'subtract' ? -pointsPerMember : pointsPerMember}, '${safeReason} (من الأسرة)', ${reviewer_id})
+          `);
+        }
+      }
+
+      // إذا كان هناك باقي، نضيفه للأسرة مباشرة حتى لا تضيع النقاط
+      if (remainder > 0) {
+        await run(`
+          INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+          VALUES (${req.params.id}, ${action === 'subtract' ? -remainder : remainder}, 1, '${safeReason} (باقي التوزيع)', ${reviewer_id})
+        `);
+      }
+
+      // إرسال إشعار لكل أعضاء الأسرة
+      const notifTitle = action === 'add' ? 'تم إضافة نقاط للأسرة 🎉' : 'تم خصم نقاط من الأسرة ⚠️';
+      const notifMessage = action === 'add'
+        ? `حصلت أسرتك "${group.name}" على ${points} نقاط! (${pointsPerMember} نقاط لكل فرد${remainder > 0 ? ` + ${remainder} للأسرة` : ''})`
+        : `تم خصم ${points} نقاط من أسرتك "${group.name}" (${pointsPerMember} نقاط من كل فرد${remainder > 0 ? ` + ${remainder} من الأسرة` : ''})`;
+
+      for (const member of members) {
+        await run(`
+          INSERT INTO notifications (user_id, title, message)
+          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
+        `);
+      }
+    } else {
+      // إضافة للأسرة مباشرة (نقاط أسرة فقط - لا تُوزع على الأفراد)
+      await run(`
+        INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+        VALUES (${req.params.id}, ${actualPoints}, 0, '${safeReason}', ${reviewer_id})
+      `);
+
+      // إرسال إشعار لكل أعضاء الأسرة
+      const members = await queryAll(`
+        SELECT id FROM users WHERE group_id = ${req.params.id} AND role = 'student'
+      `);
+
+      const notifTitle = action === 'add' ? 'تم إضافة نقاط للأسرة 🎉' : 'تم خصم نقاط من الأسرة ⚠️';
+      const notifMessage = action === 'add'
+        ? `حصلت أسرتك "${group.name}" على ${points} نقاط مباشرة!`
+        : `تم خصم ${points} نقاط من أسرتك "${group.name}"`;
+
+      for (const member of members) {
+        await run(`
+          INSERT INTO notifications (user_id, title, message)
+          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
+        `);
+      }
+    }
+
+    // تسجيل في سجل العمليات
+    await run(`
+      INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, reason, performed_by)
+      VALUES ('${action}', 'group', ${req.params.id}, ${req.params.id}, ${points}, '${safeReason}', ${reviewer_id})
+    `);
+
+    res.json({ success: true, message: `تم ${action === 'add' ? 'إضافة' : 'خصم'} ${points} نقاط ${apply_to_members ? '(موزعة على الأفراد)' : '(للأسرة مباشرة)'}` });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// زيادة أو خصم مئوي للأسرة
+app.post('/api/groups/:id/percentage', async (req, res) => {
+  const { percentage, apply_to_members, reason, reviewer_id, action } = req.body;
+  // action: 'add' للزيادة أو 'subtract' للخصم
+
+  if (!percentage || percentage <= 0) {
+    return res.status(400).json({ success: false, message: 'يجب تحديد نسبة صحيحة' });
+  }
+
+  const isSubtract = action === 'subtract';
+
+  try {
+    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    if (!group) {
+      return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
+    }
+
+    const safeReason = (reason || `${isSubtract ? 'خصم' : 'زيادة'} ${percentage}%`).replace(/'/g, "''");
+    let totalChanged = 0;
+    let groupBonus = 0;
+
+    // جلب كل أعضاء الأسرة مع نقاطهم
+    const members = await queryAll(`
+      SELECT u.id, u.name,
+      (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+       COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
+      FROM users u WHERE u.group_id = ${req.params.id} AND u.role = 'student'
+    `);
+
+    if (apply_to_members) {
+      // النسبة تُحسب على نقاط كل فرد وتضاف/تخصم للأفراد فقط
+      for (const member of members) {
+        const change = Math.floor((member.total_points * percentage) / 100);
+        if (change >= 1) {
+          // التحقق من إمكانية الخصم
+          if (isSubtract && member.total_points < change) {
+            continue; // تخطي هذا العضو إذا لم يكن لديه نقاط كافية
+          }
+          await run(`
+            INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+            VALUES (${member.id}, ${isSubtract ? -change : change}, '${safeReason}', ${reviewer_id})
+          `);
+          totalChanged += change;
+        }
+      }
+
+      // إرسال إشعار للأعضاء
+      const notifTitle = isSubtract ? 'خصم مئوي من الأسرة! 📉' : 'زيادة مئوية للأسرة! 📈';
+      const notifMessage = isSubtract
+        ? `تم خصم ${percentage}% من أسرتك "${group.name}" (مجموع ${totalChanged} نقطة من الأفراد)`
+        : `حصلت أسرتك "${group.name}" على زيادة ${percentage}% (مجموع ${totalChanged} نقطة موزعة على الأفراد)`;
+
+      for (const member of members) {
+        await run(`
+          INSERT INTO notifications (user_id, title, message)
+          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
+        `);
+      }
+    } else {
+      // حساب النقاط الكلية للأسرة (أفراد + مباشر) وإضافة/خصم النسبة للأسرة مباشرة
+      const membersTotal = members.reduce((sum, m) => sum + (m.total_points || 0), 0);
+
+      // جلب نقاط الأسرة المباشرة
+      const directPoints = await queryOne(`
+        SELECT COALESCE(SUM(points), 0) as total
+        FROM group_points_adjustments
+        WHERE group_id = ${req.params.id}
+      `);
+      const directTotal = directPoints?.total || 0;
+
+      // المجموع الكلي = أفراد + مباشر
+      const groupTotal = membersTotal + directTotal;
+      groupBonus = Math.floor((groupTotal * percentage) / 100);
+
+      if (groupBonus >= 1) {
+        // إضافة/خصم للأسرة مباشرة
+        await run(`
+          INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+          VALUES (${req.params.id}, ${isSubtract ? -groupBonus : groupBonus}, ${percentage}, 1, 0, '${safeReason}', ${reviewer_id})
+        `);
+      }
+
+      // إرسال إشعار للأعضاء
+      const notifTitle = isSubtract ? 'خصم مئوي من الأسرة! 📉' : 'زيادة مئوية للأسرة! 📈';
+      const notifMessage = isSubtract
+        ? `تم خصم ${percentage}% من أسرتك "${group.name}" (${groupBonus} نقطة من الأسرة مباشرة)`
+        : `حصلت أسرتك "${group.name}" على زيادة ${percentage}% (${groupBonus} نقطة للأسرة مباشرة)`;
+
+      for (const member of members) {
+        await run(`
+          INSERT INTO notifications (user_id, title, message)
+          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
+        `);
+      }
+    }
+
+    // تسجيل في سجل العمليات
+    await run(`
+      INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, percentage, reason, performed_by)
+      VALUES ('${isSubtract ? 'percentage_subtract' : 'percentage_add'}', 'group', ${req.params.id}, ${req.params.id}, ${apply_to_members ? totalChanged : groupBonus}, ${percentage}, '${safeReason}', ${reviewer_id})
+    `);
+
+    const actionWord = isSubtract ? 'خصم' : 'إضافة';
+    res.json({
+      success: true,
+      message: apply_to_members
+        ? `تم ${actionWord} ${percentage}% (${totalChanged} نقطة ${isSubtract ? 'من' : 'موزعة على'} الأفراد)`
+        : `تم ${actionWord} ${percentage}% (${groupBonus} نقطة ${isSubtract ? 'من' : 'إلى'} الأسرة مباشرة)`,
+      group_bonus: groupBonus,
+      members_bonus: totalChanged
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
   }
 });
 
@@ -161,7 +457,6 @@ app.delete('/api/supervisors/:id', async (req, res) => {
 app.get('/api/students', async (req, res) => {
   const students = await queryAll(`
     SELECT u.id, u.name, u.code, u.group_id, g.name as group_name, u.created_at,
-    COALESCE(u.points_hidden, 0) as points_hidden,
     (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
      COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
     FROM users u
@@ -179,28 +474,6 @@ app.post('/api/students', async (req, res) => {
     const groupVal = group_id ? group_id : 'NULL';
     await run(`INSERT INTO users (name, code, role, group_id) VALUES ('${name}', '${code}', 'student', ${groupVal})`);
     const id = await getLastInsertId();
-
-    // جلب اسم الأسرة إذا وجدت
-    let groupName = null;
-    if (group_id) {
-      const group = await queryOne(`SELECT name FROM groups WHERE id = ${group_id}`);
-      groupName = group ? group.name : null;
-    }
-
-    // إرسال إشعار للطالب الجديد
-    await notifyNewStudent(id, name, code);
-
-    // إنشاء إشعار ترحيبي في قاعدة البيانات
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${id}, 'مرحباً بك في نظام سلطان! 🎉', 'أهلاً ${name}! رمز دخولك هو: ${code}')
-    `);
-
-    // إشعار المشرفين والأدمن
-    const supervisors = await queryAll(`SELECT id FROM users WHERE role = 'supervisor'`);
-    const admins = await queryAll(`SELECT id FROM users WHERE role = 'admin'`);
-    await notifyNewStudentToSupervisors(name, groupName, supervisors.map(s => s.id), admins.map(a => a.id));
-
     res.json({ success: true, id, code });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الإنشاء' });
@@ -211,40 +484,8 @@ app.post('/api/students', async (req, res) => {
 app.put('/api/students/:id', async (req, res) => {
   const { name, group_id } = req.body;
   try {
-    // جلب بيانات الطالب الحالية
-    const currentStudent = await queryOne(`
-      SELECT u.group_id, g.name as group_name
-      FROM users u
-      LEFT JOIN groups g ON u.group_id = g.id
-      WHERE u.id = ${req.params.id}
-    `);
-
     const groupVal = group_id ? group_id : 'NULL';
     await run(`UPDATE users SET name = '${name}', group_id = ${groupVal} WHERE id = ${req.params.id}`);
-
-    // إذا تغيرت الأسرة، أرسل إشعار
-    if (currentStudent && String(currentStudent.group_id) !== String(group_id)) {
-      let newGroupName = null;
-      if (group_id) {
-        const newGroup = await queryOne(`SELECT name FROM groups WHERE id = ${group_id}`);
-        newGroupName = newGroup ? newGroup.name : null;
-      }
-
-      if (newGroupName) {
-        await notifyGroupChanged(req.params.id, newGroupName, currentStudent.group_name);
-
-        // إنشاء إشعار في قاعدة البيانات
-        const message = currentStudent.group_name
-          ? `تم نقلك من أسرة "${currentStudent.group_name}" إلى أسرة "${newGroupName}"`
-          : `تم إضافتك إلى أسرة "${newGroupName}"`;
-
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${req.params.id}, 'تغيير الأسرة 👥', '${message.replace(/'/g, "''")}')
-        `);
-      }
-    }
-
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في التعديل' });
@@ -263,7 +504,7 @@ app.delete('/api/students/:id', async (req, res) => {
 
 // تعديل نقاط طالب (إضافة أو خصم)
 app.post('/api/students/:id/points', async (req, res) => {
-  const { points, action, reason, reviewer_id } = req.body;
+  const { points, action, reason, reviewer_id, apply_to_group, group_id } = req.body;
   // action: 'add' للإضافة أو 'subtract' للخصم
 
   if (!points || points < 1) {
@@ -322,6 +563,14 @@ app.post('/api/students/:id/points', async (req, res) => {
       VALUES (${req.params.id}, ${actualPoints}, '${safeReason}', ${reviewer_id})
     `);
 
+    // إذا كان الخيار مفعل - إضافة النقاط للأسرة أيضاً
+    if (apply_to_group && group_id) {
+      await run(`
+        INSERT INTO group_points_adjustments (group_id, points, reason, adjusted_by, apply_to_members)
+        VALUES (${group_id}, ${actualPoints}, '${safeReason} (من الطالب)', ${reviewer_id}, 0)
+      `);
+    }
+
     // حساب النقاط الجديدة
     const newPoints = currentPoints + actualPoints;
 
@@ -356,38 +605,6 @@ app.post('/api/students/:id/points', async (req, res) => {
   } catch (error) {
     console.error('خطأ في تعديل النقاط:', error.message, error.stack);
     res.status(400).json({ success: false, message: 'حدث خطأ في تعديل النقاط: ' + error.message });
-  }
-});
-
-// تبديل حالة إخفاء النقاط للطالب
-app.post('/api/students/:id/toggle-points-visibility', async (req, res) => {
-  const { hidden, reason } = req.body;
-
-  try {
-    // تحديث حالة إخفاء النقاط
-    await run(`UPDATE users SET points_hidden = ${hidden ? 1 : 0} WHERE id = ${req.params.id}`);
-
-    // جلب اسم الطالب
-    const student = await queryOne(`SELECT name FROM users WHERE id = ${req.params.id}`);
-
-    // إرسال إشعار للطالب
-    await notifyPointsVisibilityChanged(req.params.id, hidden, reason);
-
-    // إنشاء إشعار في قاعدة البيانات
-    const notifTitle = hidden ? 'تم إخفاء نقاطك 🚫' : 'تم إظهار نقاطك ✅';
-    const notifMessage = hidden
-      ? `تم منعك من رؤية نقاطك مؤقتاً${reason ? '. السبب: ' + reason : ''}`
-      : 'يمكنك الآن رؤية نقاطك مرة أخرى';
-
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${req.params.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-    `);
-
-    res.json({ success: true, points_hidden: hidden });
-  } catch (error) {
-    console.error('خطأ في تغيير حالة إخفاء النقاط:', error);
-    res.status(400).json({ success: false, message: 'حدث خطأ' });
   }
 });
 
@@ -462,16 +679,6 @@ app.post('/api/requests', async (req, res) => {
 
     await notifyNewRequest(student ? student.name : 'طالب', supervisorIds, adminIds);
 
-    // التحقق إذا وصل للحد الأسبوعي بعد هذا الطلب
-    const newCount = (currentWeekRequests?.count || 0) + 1;
-    if (newCount >= 20) {
-      await notifyWeeklyLimitReached(student_id);
-      await run(`
-        INSERT INTO notifications (user_id, title, message)
-        VALUES (${student_id}, 'وصلت للحد الأسبوعي ⚠️', 'لقد وصلت للحد الأقصى من الطلبات هذا الأسبوع (20 طلب). انتظر الأسبوع القادم!')
-      `);
-    }
-
     res.json({ success: true, id });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في إنشاء الطلب' });
@@ -545,6 +752,7 @@ app.get('/api/stats/student/:studentId', async (req, res) => {
     ethanol: 0
   };
 
+  // جلب الطلبات المقبولة
   const approvedRequests = await queryAll(`
     SELECT points FROM requests
     WHERE student_id = ${req.params.studentId} AND status = 'approved'
@@ -560,15 +768,70 @@ app.get('/api/stats/student/:studentId', async (req, res) => {
     }
   });
 
+  // جلب التعديلات اليدوية - جمع المجموع الكلي
+  const adjustmentsSum = await queryOne(`
+    SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments
+    WHERE student_id = ${req.params.studentId}
+  `);
+
+  let adjustmentTotal = adjustmentsSum?.total || 0;
+
+  // توزيع مجموع التعديلات على الخزانات
+  if (adjustmentTotal > 0) {
+    // إضافة - نوزع على الخزانات من الأعلى للأقل
+    let remaining = adjustmentTotal;
+    while (remaining > 0) {
+      if (remaining >= 5) { fuel.ethanol++; remaining -= 5; }
+      else if (remaining >= 4) { fuel.fuel98++; remaining -= 4; }
+      else if (remaining >= 3) { fuel.fuel95++; remaining -= 3; }
+      else if (remaining >= 2) { fuel.fuel91++; remaining -= 2; }
+      else { fuel.diesel++; remaining -= 1; }
+    }
+  } else if (adjustmentTotal < 0) {
+    // خصم - نخصم من الخزانات من الأعلى للأقل
+    let toDeduct = Math.abs(adjustmentTotal);
+
+    // خصم من إيثانول أولاً
+    if (fuel.ethanol >= toDeduct) { fuel.ethanol -= toDeduct; toDeduct = 0; }
+    else { toDeduct -= fuel.ethanol; fuel.ethanol = 0; }
+
+    // ثم من 98
+    if (toDeduct > 0) {
+      if (fuel.fuel98 >= toDeduct) { fuel.fuel98 -= toDeduct; toDeduct = 0; }
+      else { toDeduct -= fuel.fuel98; fuel.fuel98 = 0; }
+    }
+
+    // ثم من 95
+    if (toDeduct > 0) {
+      if (fuel.fuel95 >= toDeduct) { fuel.fuel95 -= toDeduct; toDeduct = 0; }
+      else { toDeduct -= fuel.fuel95; fuel.fuel95 = 0; }
+    }
+
+    // ثم من 91
+    if (toDeduct > 0) {
+      if (fuel.fuel91 >= toDeduct) { fuel.fuel91 -= toDeduct; toDeduct = 0; }
+      else { toDeduct -= fuel.fuel91; fuel.fuel91 = 0; }
+    }
+
+    // ثم من ديزل
+    if (toDeduct > 0) {
+      fuel.diesel = Math.max(0, fuel.diesel - toDeduct);
+    }
+  }
+
   const weekNumber = getWeekNumber();
   const weeklyRequests = await queryOne(`
     SELECT COUNT(*) as count FROM requests
     WHERE student_id = ${req.params.studentId} AND week_number = ${weekNumber}
   `);
 
+  // حساب النقاط الكلية (كل خزان × قيمته)
+  const totalPoints = (fuel.diesel * 1) + (fuel.fuel91 * 2) + (fuel.fuel95 * 3) + (fuel.fuel98 * 4) + (fuel.ethanol * 5);
+
   res.json({
     fuel,
     totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol,
+    totalPoints: totalPoints,
     weeklyRequestsCount: weeklyRequests ? weeklyRequests.count : 0,
     weeklyRequestsLimit: 20
   });
@@ -576,33 +839,63 @@ app.get('/api/stats/student/:studentId', async (req, res) => {
 
 // إحصائيات أسرة
 app.get('/api/stats/group/:groupId', async (req, res) => {
-  const fuel = {
-    diesel: 0,
-    fuel91: 0,
-    fuel95: 0,
-    fuel98: 0,
-    ethanol: 0
-  };
-
-  const approvedRequests = await queryAll(`
-    SELECT r.points FROM requests r
+  // جلب مجموع نقاط الطلبات المقبولة لأعضاء الأسرة
+  const membersRequestsSum = await queryOne(`
+    SELECT COALESCE(SUM(r.points), 0) as total
+    FROM requests r
     JOIN users u ON r.student_id = u.id
     WHERE u.group_id = ${req.params.groupId} AND r.status = 'approved'
   `);
 
-  approvedRequests.forEach(r => {
-    switch(r.points) {
-      case 1: fuel.diesel++; break;
-      case 2: fuel.fuel91++; break;
-      case 3: fuel.fuel95++; break;
-      case 4: fuel.fuel98++; break;
-      case 5: fuel.ethanol++; break;
+  // جلب مجموع التعديلات اليدوية للأفراد
+  const membersAdjustmentsSum = await queryOne(`
+    SELECT COALESCE(SUM(pa.points), 0) as total
+    FROM points_adjustments pa
+    JOIN users u ON pa.student_id = u.id
+    WHERE u.group_id = ${req.params.groupId}
+  `);
+
+  // جلب مجموع نقاط الأسرة المباشرة
+  const directAdjustmentsSum = await queryOne(`
+    SELECT COALESCE(SUM(points), 0) as total
+    FROM group_points_adjustments
+    WHERE group_id = ${req.params.groupId}
+  `);
+
+  const membersRequestsTotal = membersRequestsSum?.total || 0;
+  const membersAdjTotal = membersAdjustmentsSum?.total || 0;
+  const directTotal = directAdjustmentsSum?.total || 0;
+
+  // مجموع نقاط الأفراد (طلبات + تعديلات)
+  const membersPointsTotal = membersRequestsTotal + membersAdjTotal;
+
+  // المجموع الكلي للأسرة
+  const grandTotal = membersPointsTotal + directTotal;
+
+  // توزيع المجموع الكلي على الخزانات
+  const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+
+  if (grandTotal > 0) {
+    let remaining = grandTotal;
+    while (remaining > 0) {
+      if (remaining >= 5) { fuel.ethanol++; remaining -= 5; }
+      else if (remaining >= 4) { fuel.fuel98++; remaining -= 4; }
+      else if (remaining >= 3) { fuel.fuel95++; remaining -= 3; }
+      else if (remaining >= 2) { fuel.fuel91++; remaining -= 2; }
+      else { fuel.diesel++; remaining -= 1; }
     }
-  });
+  }
+  // إذا كان سالب أو صفر، الخزانات تبقى فارغة
+
+  // حساب النقاط الكلية (كل خزان × قيمته)
+  const totalPoints = (fuel.diesel * 1) + (fuel.fuel91 * 2) + (fuel.fuel95 * 3) + (fuel.fuel98 * 4) + (fuel.ethanol * 5);
 
   res.json({
     fuel,
-    totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol
+    totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol,
+    totalPoints: grandTotal,
+    membersPoints: membersPointsTotal,
+    directPoints: directTotal
   });
 });
 
@@ -647,6 +940,90 @@ app.get('/api/notifications/:userId/unread-count', async (req, res) => {
     SELECT COUNT(*) as count FROM notifications WHERE user_id = ${req.params.userId} AND is_read = 0
   `);
   res.json({ count: count ? count.count : 0 });
+});
+
+// ==================== Settings Routes ====================
+
+// جلب كل الإعدادات
+app.get('/api/settings', async (req, res) => {
+  try {
+    const settings = await queryAll('SELECT * FROM settings');
+    const settingsObj = {};
+    settings.forEach(s => {
+      settingsObj[s.key] = s.value;
+    });
+
+    // إعدادات افتراضية إذا لم تكن موجودة
+    const defaults = {
+      auto_sync_to_group: 'true',
+      sync_approved_requests: 'true',
+      sync_manual_adjustments: 'true',
+      hide_points_from_all: 'false'
+    };
+
+    res.json({ ...defaults, ...settingsObj });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// تحديث إعداد
+app.post('/api/settings', async (req, res) => {
+  const { key, value } = req.body;
+
+  try {
+    // تحقق إذا الإعداد موجود
+    const existing = await queryOne(`SELECT id FROM settings WHERE key = '${key}'`);
+
+    if (existing) {
+      await run(`UPDATE settings SET value = '${value}', updated_at = datetime('now') WHERE key = '${key}'`);
+    } else {
+      await run(`INSERT INTO settings (key, value) VALUES ('${key}', '${value}')`);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ==================== Points Log Routes ====================
+
+// جلب سجل العمليات
+app.get('/api/points-log', async (req, res) => {
+  try {
+    const logs = await queryAll(`
+      SELECT pl.*, u.name as performer_name
+      FROM points_log pl
+      LEFT JOIN users u ON pl.performed_by = u.id
+      ORDER BY pl.created_at DESC
+      LIMIT 100
+    `);
+    res.json(logs);
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// فحص جداول التعديلات (للتصحيح)
+app.get('/api/debug/adjustments', async (req, res) => {
+  try {
+    const pointsAdj = await queryAll(`SELECT * FROM points_adjustments ORDER BY created_at DESC`);
+    const groupAdj = await queryAll(`SELECT * FROM group_points_adjustments ORDER BY created_at DESC`);
+
+    // حساب المجموع
+    const studentSum = await queryOne(`SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments WHERE student_id = 2`);
+    const groupSum = await queryOne(`SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = 1`);
+
+    res.json({
+      points_adjustments: pointsAdj,
+      group_points_adjustments: groupAdj,
+      student_2_sum: studentSum?.total || 0,
+      group_1_sum: groupSum?.total || 0
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
 });
 
 // ==================== Reports Routes ====================

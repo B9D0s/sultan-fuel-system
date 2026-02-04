@@ -42,6 +42,8 @@ const AuthAPI = {
 const GroupsAPI = {
   getAll: () => apiCall('/groups'),
 
+  getDetails: (id) => apiCall(`/groups/${id}/details`),
+
   create: (name) => apiCall('/groups', {
     method: 'POST',
     body: JSON.stringify({ name })
@@ -54,6 +56,16 @@ const GroupsAPI = {
 
   delete: (id) => apiCall(`/groups/${id}`, {
     method: 'DELETE'
+  }),
+
+  addPoints: (id, points, action, reason, apply_to_members, reviewer_id) => apiCall(`/groups/${id}/points`, {
+    method: 'POST',
+    body: JSON.stringify({ points, action, reason, apply_to_members, reviewer_id })
+  }),
+
+  addPercentage: (id, percentage, apply_to_members, reason, reviewer_id, action = 'add') => apiCall(`/groups/${id}/percentage`, {
+    method: 'POST',
+    body: JSON.stringify({ percentage, apply_to_members, reason, reviewer_id, action })
   })
 };
 
@@ -146,4 +158,19 @@ const ExportAPI = {
   groupPDF: (groupId) => `${API_URL}/export/group/${groupId}`,
 
   allPDF: () => `${API_URL}/export/all`
+};
+
+// ==================== Settings API ====================
+const SettingsAPI = {
+  getAll: () => apiCall('/settings'),
+
+  update: (key, value) => apiCall('/settings', {
+    method: 'POST',
+    body: JSON.stringify({ key, value })
+  })
+};
+
+// ==================== Points Log API ====================
+const PointsLogAPI = {
+  getAll: () => apiCall('/points-log')
 };
