@@ -759,6 +759,8 @@ tr:hover {
   opacity: 0;
   visibility: hidden;
   transition: all 0.3s ease;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 .modal-overlay.active {
@@ -769,12 +771,13 @@ tr:hover {
 .modal {
   background: var(--white);
   border-radius: 20px;
-  width: 90%;
+  width: 100%;
   max-width: 500px;
-  max-height: 90vh;
+  max-height: 85vh;
   overflow-y: auto;
   transform: translateY(-20px);
   transition: all 0.3s ease;
+  margin: auto;
 }
 
 .modal-overlay.active .modal {
@@ -787,6 +790,10 @@ tr:hover {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--white);
+  z-index: 10;
 }
 
 .modal-header h2 {
@@ -800,6 +807,11 @@ tr:hover {
   cursor: pointer;
   color: var(--text-gray);
   transition: color 0.3s ease;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .modal-close:hover {
@@ -816,6 +828,9 @@ tr:hover {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+  position: sticky;
+  bottom: 0;
+  background: var(--white);
 }
 
 /* ==================== Notifications Panel ==================== */
@@ -1016,8 +1031,39 @@ tr:hover {
     height: 150px;
   }
 
+  /* تحسين المودال للجوال */
+  .modal-overlay {
+    padding: 10px;
+    align-items: flex-start;
+    padding-top: 60px;
+  }
+
   .modal {
-    width: 95%;
+    width: 100%;
+    max-width: 100%;
+    max-height: calc(100vh - 80px);
+    border-radius: 16px;
+  }
+
+  .modal-header {
+    padding: 15px;
+  }
+
+  .modal-header h2 {
+    font-size: 1.1rem;
+  }
+
+  .modal-body {
+    padding: 15px;
+  }
+
+  .modal-footer {
+    padding: 15px;
+    flex-direction: column;
+  }
+
+  .modal-footer .btn {
+    width: 100%;
   }
 
   .stats-grid {
@@ -1058,32 +1104,37 @@ tr:hover {
 
   .table-container {
     margin: 0 -10px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   table {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
+    min-width: 600px;
   }
 
   th, td {
-    padding: 10px 8px;
+    padding: 10px 6px;
     white-space: nowrap;
-  }
-
-  /* إخفاء بعض الأعمدة غير المهمة */
-  table th:nth-child(1),
-  table td:nth-child(1) {
-    display: none;
   }
 
   .action-btns {
     flex-direction: row;
-    gap: 5px;
+    gap: 4px;
+    flex-wrap: nowrap;
   }
 
   .action-btn {
-    width: 32px;
-    height: 32px;
-    font-size: 0.8rem;
+    width: 30px;
+    height: 30px;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+  }
+
+  .points-btn {
+    width: 28px;
+    height: 28px;
+    font-size: 0.7rem;
   }
 
   .status-badge {
@@ -1094,6 +1145,18 @@ tr:hover {
   /* تحسين لوحة الإشعارات */
   .notifications-panel {
     width: 100%;
+  }
+
+  /* تحسين الـ form inputs */
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    font-size: 16px; /* منع الزوم على iOS */
+    padding: 12px;
+  }
+
+  .points-input {
+    font-size: 16px;
   }
 }
 
@@ -1613,6 +1676,7 @@ input:checked + .slider:before {
   .group-actions-grid .btn {
     width: 100%;
   }
+
 }
 
 /* ==================== iPad / Tablet Responsive ==================== */
@@ -1686,6 +1750,121 @@ input:checked + .slider:before {
   .main-content {
     padding-left: max(15px, env(safe-area-inset-left));
     padding-right: max(15px, env(safe-area-inset-right));
+  }
+}
+
+/* ==================== Mobile Groups Cards ==================== */
+.groups-cards-mobile {
+  display: none;
+}
+
+.groups-table-desktop {
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .groups-cards-mobile {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .groups-table-desktop {
+    display: none;
+  }
+
+  .group-card-mobile {
+    background: var(--white);
+    border-radius: 12px;
+    padding: 15px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    border: 1px solid #e2e8f0;
+  }
+
+  .group-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  .group-rank {
+    width: 28px;
+    height: 28px;
+    background: var(--primary);
+    color: var(--white);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+  }
+
+  .group-name-link {
+    flex: 1;
+    font-weight: 600;
+    color: var(--primary-dark);
+    text-decoration: none;
+    font-size: 1rem;
+  }
+
+  .group-total {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .group-total .fuel-indicator {
+    font-size: 1.2rem;
+  }
+
+  .group-total .points-badge {
+    font-size: 0.8rem;
+    padding: 4px 10px;
+  }
+
+  .group-card-stats {
+    display: flex;
+    justify-content: space-around;
+    margin-bottom: 12px;
+    background: var(--bg-light);
+    border-radius: 8px;
+    padding: 10px;
+  }
+
+  .group-card-stats .stat-item {
+    text-align: center;
+  }
+
+  .group-card-stats .stat-label {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-gray);
+    margin-bottom: 3px;
+  }
+
+  .group-card-stats .stat-value {
+    display: block;
+    font-weight: 700;
+    color: var(--text-dark);
+    font-size: 0.95rem;
+  }
+
+  .group-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+  }
+
+  .group-card-actions .action-btn {
+    width: 38px;
+    height: 38px;
+    font-size: 0.85rem;
   }
 }
 

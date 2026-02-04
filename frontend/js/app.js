@@ -559,7 +559,63 @@ async function renderGroupsPage() {
       <div class="card">
         <div class="card-body">
           ${groups.length > 0 ? `
-            <div class="table-container">
+            <!-- عرض الكروت للجوال -->
+            <div class="groups-cards-mobile">
+              ${groups.map((g, i) => `
+                <div class="group-card-mobile">
+                  <div class="group-card-header">
+                    <span class="group-rank">${i + 1}</span>
+                    <a href="#" onclick="viewGroupDetails(${g.id})" class="group-name-link">${g.name}</a>
+                    <span class="group-total">
+                      <span class="fuel-indicator">${getFuelEmoji(g.total_points || 0)}</span>
+                      <span class="points-badge">${g.total_points || 0}</span>
+                    </span>
+                  </div>
+                  <div class="group-card-stats">
+                    <div class="stat-item">
+                      <span class="stat-label">الطلاب</span>
+                      <span class="stat-value">${g.student_count}</span>
+                    </div>
+                    <div class="stat-item">
+                      <span class="stat-label">الأفراد</span>
+                      <span class="stat-value">${g.members_points || 0}</span>
+                    </div>
+                    <div class="stat-item">
+                      <span class="stat-label">الأسرة</span>
+                      <span class="stat-value">${g.direct_points || 0}</span>
+                    </div>
+                  </div>
+                  <div class="group-card-actions">
+                    <button class="action-btn view" onclick="viewGroupDetails(${g.id})" title="عرض">
+                      <i class="fas fa-eye"></i>
+                    </button>
+                    <button class="action-btn add-points" onclick="showAddGroupPointsModal(${g.id}, '${g.name}', ${g.total_points || 0})" title="إضافة">
+                      <i class="fas fa-plus"></i>
+                    </button>
+                    <button class="action-btn subtract-points" onclick="showSubtractGroupPointsModal(${g.id}, '${g.name}', ${g.total_points || 0})" title="خصم">
+                      <i class="fas fa-minus"></i>
+                    </button>
+                    <button class="action-btn percentage" onclick="showGroupPercentageModal(${g.id}, '${g.name}', 'add')" title="+%">
+                      <i class="fas fa-percentage"></i>+
+                    </button>
+                    <button class="action-btn percentage-subtract" onclick="showGroupPercentageModal(${g.id}, '${g.name}', 'subtract')" title="-%">
+                      <i class="fas fa-percentage"></i>-
+                    </button>
+                    ${currentUser.role === 'admin' ? `
+                      <button class="action-btn edit" onclick="showEditGroupModal(${g.id}, '${g.name}')" title="تعديل">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      <button class="action-btn delete" onclick="deleteGroup(${g.id})" title="حذف">
+                        <i class="fas fa-trash"></i>
+                      </button>
+                    ` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+
+            <!-- عرض الجدول للديسكتوب -->
+            <div class="table-container groups-table-desktop">
               <table>
                 <thead>
                   <tr>
