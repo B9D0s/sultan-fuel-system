@@ -70,6 +70,45 @@ const createTables = async () => {
     // العمود موجود بالفعل، تجاهل الخطأ
   }
 
+  // تأكد من وجود جداول نقاط الأسر (للنسخ القديمة من القاعدة)
+  const extraTables = [
+    `CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS group_points_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      points INTEGER NOT NULL,
+      percentage REAL,
+      is_percentage INTEGER DEFAULT 0,
+      apply_to_members INTEGER DEFAULT 0,
+      reason TEXT,
+      adjusted_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (group_id) REFERENCES groups(id),
+      FOREIGN KEY (adjusted_by) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS points_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operation_type TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      group_id INTEGER,
+      points INTEGER,
+      percentage REAL,
+      reason TEXT,
+      performed_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`
+  ];
+  for (const sql of extraTables) {
+    try {
+      await run(sql, false);
+    } catch (e) { /* تجاهل */ }
+  }
+
   const tables = [
     `CREATE TABLE IF NOT EXISTS groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +160,31 @@ const createTables = async () => {
       is_read INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS group_points_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      points INTEGER NOT NULL,
+      percentage REAL,
+      is_percentage INTEGER DEFAULT 0,
+      apply_to_members INTEGER DEFAULT 0,
+      reason TEXT,
+      adjusted_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (group_id) REFERENCES groups(id),
+      FOREIGN KEY (adjusted_by) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS points_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operation_type TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      group_id INTEGER,
+      points INTEGER,
+      percentage REAL,
+      reason TEXT,
+      performed_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`
   ];
 

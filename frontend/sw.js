@@ -1,18 +1,23 @@
 // Service Worker - طاقات السلطان
-const CACHE_NAME = 'sultan-fuel-v2';
+const STATIC_CACHE = 'sultan-fuel-static-v3';
+const RUNTIME_CACHE = 'sultan-fuel-runtime-v3';
+
 const urlsToCache = [
   '/',
   '/index.html',
+  '/offline.html',
   '/css/style.css',
   '/js/api.js',
   '/js/app.js',
-  '/manifest.json'
+  '/manifest.json',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png'
 ];
 
 // تثبيت Service Worker
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
+    caches.open(STATIC_CACHE)
       .then((cache) => {
         console.log('فتح الكاش');
         return cache.addAll(urlsToCache);
@@ -30,7 +35,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
+          if (![STATIC_CACHE, RUNTIME_CACHE].includes(cacheName) && cacheName.startsWith('sultan-fuel-')) {
             console.log('حذف كاش قديم:', cacheName);
             return caches.delete(cacheName);
           }
@@ -41,10 +46,59 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// استراتيجية Network First مع Fallback للكاش
+// دعم تحديث فوري عند وجود إصدار جديد
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+function isSameOrigin(url) {
+  try {
+    return new URL(url).origin === self.location.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function staleWhileRevalidate(request) {
+  const cache = await caches.open(STATIC_CACHE);
+  const cached = await cache.match(request);
+  const fetchPromise = fetch(request)
+    .then((response) => {
+      if (response && response.status === 200 && isSameOrigin(request.url)) {
+        cache.put(request, response.clone());
+      }
+      return response;
+    })
+    .catch(() => null);
+  return cached || (await fetchPromise) || cached;
+}
+
+async function networkFirst(request) {
+  const cache = await caches.open(RUNTIME_CACHE);
+  try {
+    const response = await fetch(request);
+    if (response && response.status === 200 && isSameOrigin(request.url)) {
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch (e) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    return null;
+  }
+}
+
+// استراتيجية محسّنة مع fallback
 self.addEventListener('fetch', (event) => {
   // تجاهل طلبات غير HTTP/HTTPS
   if (!event.request.url.startsWith('http')) {
+    return;
+  }
+
+  // تجاهل غير GET
+  if (event.request.method && event.request.method !== 'GET') {
     return;
   }
 
@@ -63,31 +117,39 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        // فقط خزّن الطلبات الناجحة من نفس الموقع
-        if (response.status === 200 && event.request.url.startsWith(self.location.origin)) {
-          const responseClone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseClone);
-          });
-        }
-        return response;
-      })
-      .catch(() => {
-        // إذا فشل الاتصال، جرب الكاش
-        return caches.match(event.request).then((response) => {
-          if (response) {
-            return response;
-          }
-          // صفحة offline افتراضية
-          if (event.request.mode === 'navigate') {
-            return caches.match('/index.html');
-          }
-        });
-      })
-  );
+  const reqUrl = new URL(event.request.url);
+  const isAsset =
+    reqUrl.pathname.startsWith('/css/') ||
+    reqUrl.pathname.startsWith('/js/') ||
+    reqUrl.pathname.startsWith('/icons/') ||
+    reqUrl.pathname === '/manifest.json' ||
+    ['style', 'script', 'image', 'font'].includes(event.request.destination);
+
+  // تنقل الصفحات: Network First + offline fallback
+  if (event.request.mode === 'navigate') {
+    event.respondWith((async () => {
+      const net = await networkFirst(event.request);
+      if (net) return net;
+      const cached = await caches.match('/offline.html');
+      return cached || (await caches.match('/index.html'));
+    })());
+    return;
+  }
+
+  // الأصول: Stale-While-Revalidate لسرعة + تحديث تدريجي
+  if (isAsset && isSameOrigin(event.request.url)) {
+    event.respondWith(staleWhileRevalidate(event.request));
+    return;
+  }
+
+  // باقي الطلبات من نفس الأصل: Network First مع fallback للكاش
+  if (isSameOrigin(event.request.url)) {
+    event.respondWith((async () => {
+      const net = await networkFirst(event.request);
+      if (net) return net;
+      return caches.match(event.request);
+    })());
+  }
 });
 
 // استقبال الإشعارات

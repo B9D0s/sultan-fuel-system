@@ -1,0 +1,13 @@
+{
+  "watch": ["backend"],
+  "ext": "js,json",
+  "ignore": [
+    "backend/sultan_fuel.db",
+    "frontend/**",
+    "tests/**",
+    "**/*.log"
+  ],
+  "exec": "node backend/server.js",
+  "signal": "SIGTERM",
+  "delay": "150"
+}

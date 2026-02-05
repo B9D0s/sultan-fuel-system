@@ -137,6 +137,22 @@ body {
   box-shadow: 0 0 0 3px rgba(8, 131, 149, 0.1);
 }
 
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-dark);
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
 .code-input {
   text-align: center;
   font-size: 1.5rem !important;
@@ -190,6 +206,15 @@ body {
   color: var(--white);
 }
 
+.btn-warning {
+  background: var(--warning);
+  color: var(--white);
+}
+
+.btn-warning:hover {
+  background: #d97706;
+}
+
 .btn-small {
   padding: 8px 16px;
   width: auto;
@@ -203,8 +228,140 @@ body {
   border-radius: 8px;
   margin-top: 15px;
   text-align: center;
-  display: none;
 }
+.error-message .hint {
+  margin-top: 10px;
+  font-size: 0.9rem;
+  color: #666;
+}
+.error-message code {
+  background: #eee;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* ==================== Accessibility / Focus ==================== */
+:where(a, button, input, select, textarea, [role="button"], .nav-item, .mobile-nav-item):focus-visible {
+  outline: 3px solid rgba(8, 131, 149, 0.45);
+  outline-offset: 2px;
+}
+
+/* ==================== Toasts ==================== */
+.toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #e2e8f0;
+  border-right-width: 5px;
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 25px rgba(0,0,0,.08);
+  color: var(--text-dark);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  backdrop-filter: blur(8px);
+}
+.toast.success { border-right-color: #22c55e; }
+.toast.error { border-right-color: #ef4444; }
+.toast.info { border-right-color: var(--primary); }
+.toast .toast-msg { font-size: 0.95rem; line-height: 1.4; }
+.toast .toast-close {
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 10px;
+}
+.toast .toast-close:hover { background: rgba(2,6,23,.06); }
+
+/* ==================== Table scroll hint (mobile) ==================== */
+.table-container {
+  position: relative;
+}
+.table-container.is-scrollable::after {
+  content: "اسحب لليمين/اليسار لرؤية بقية الجدول";
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  background: rgba(2, 6, 23, 0.55);
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+@media (min-width: 769px) {
+  .table-container.is-scrollable::after { display: none; }
+}
+
+/* ==================== Settings ==================== */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 12px;
+  border-radius: 12px;
+  background: rgba(9, 99, 126, 0.04);
+  margin-bottom: 12px;
+}
+.setting-info { flex: 1; }
+.setting-title {
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+.setting-desc {
+  color: #64748b;
+  font-size: 0.95rem;
+}
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 54px;
+  height: 30px;
+  flex: 0 0 auto;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #cbd5e1;
+  transition: .2s;
+  border-radius: 999px;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 24px;
+  width: 24px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #ffffff;
+  transition: .2s;
+  border-radius: 999px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.switch input:checked + .slider { background-color: #22c55e; }
+.switch input:checked + .slider:before { transform: translateX(24px); }
+
+.loading-message {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-secondary);
+}
+.loading-message i { margin-left: 8px; }
 
 /* ==================== Dashboard Layout ==================== */
 .dashboard {
@@ -642,6 +799,81 @@ tr:hover {
   color: var(--white);
 }
 
+.action-btn.view {
+  background: rgba(8, 131, 149, 0.1);
+  color: var(--primary);
+}
+
+.action-btn.view:hover {
+  background: var(--primary);
+  color: var(--white);
+}
+
+.action-btn.add-points {
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--success);
+}
+
+.action-btn.add-points:hover {
+  background: var(--success);
+  color: var(--white);
+}
+
+.action-btn.subtract-points {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+
+.action-btn.subtract-points:hover {
+  background: var(--danger);
+  color: var(--white);
+}
+
+.action-btn.percentage {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}
+
+.action-btn.percentage:hover {
+  background: var(--success);
+  color: var(--white);
+}
+
+.action-btn.percentage-subtract {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+}
+
+.action-btn.percentage-subtract:hover {
+  background: var(--warning);
+  color: var(--white);
+}
+
+.group-link {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.group-link:hover {
+  text-decoration: underline;
+}
+
+.group-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.current-fuel-status {
+  margin-bottom: 15px;
+  padding: 10px;
+  background: var(--bg-light);
+  border-radius: 8px;
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
 .action-btn.visibility-on {
   background: rgba(34, 197, 94, 0.1);
   color: var(--success);
@@ -668,11 +900,6 @@ tr:hover {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.fuel-indicator {
-  font-size: 1.5rem;
-  line-height: 1;
 }
 
 .points-badge {
@@ -766,7 +993,8 @@ tr:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  /* لازم يكون فوق التنقل السفلي ولوحة الإشعارات */
+  z-index: 2000;
   opacity: 0;
   visibility: hidden;
   transition: all 0.3s ease;
@@ -1039,6 +1267,7 @@ tr:hover {
     padding: 15px;
     padding-top: 75px;
     padding-bottom: 90px;
+    overflow-x: hidden;
   }
 
   .page-header {
@@ -1056,6 +1285,12 @@ tr:hover {
 
   .modal {
     width: 95%;
+    max-height: 85vh;
+  }
+
+  .modal-body {
+    max-height: 55vh;
+    overflow-y: auto;
   }
 
   .stats-grid {
@@ -1096,6 +1331,14 @@ tr:hover {
 
   .table-container {
     margin: 0 -10px;
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  .table-container table {
+    min-width: 520px;
   }
 
   table {
@@ -1143,10 +1386,6 @@ tr:hover {
 
   .points-actions {
     margin-top: 5px;
-  }
-
-  .fuel-indicator {
-    font-size: 1.2rem;
   }
 
   .points-badge {
