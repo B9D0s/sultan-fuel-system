@@ -2,9 +2,22 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId } = require('./database');
+const os = require('os');
+const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId, queryWithTimeout, queryOneWithTimeout } = require('./database');
 const PDFDocument = require('pdfkit');
-const { notifyRequestApproved, notifyRequestRejected, notifyNewRequest, notifyPointsAdded, notifyPointsSubtracted } = require('./notifications');
+const { version: APP_VERSION } = require('./package.json');
+const {
+  notifyRequestApproved,
+  notifyRequestRejected,
+  notifyNewRequest,
+  notifyPointsAdded,
+  notifyPointsSubtracted,
+  notifyPointsVisibilityChanged,
+  notifyNewStudent,
+  notifyGroupChanged,
+  notifyWeeklyLimitReached,
+  notifyNewStudentToSupervisors
+} = require('./notifications');
 
 // مسار الخط العربي
 const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
@@ -12,9 +25,130 @@ const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ==================== In-Memory TTL Cache ====================
+const _cache = new Map();
+
+function cacheGet(key) {
+  const entry = _cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiry) {
+    _cache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function cacheSet(key, value, ttlMs) {
+  _cache.set(key, { value, expiry: Date.now() + ttlMs });
+}
+
+function cacheInvalidate(prefix) {
+  for (const key of _cache.keys()) {
+    if (key.startsWith(prefix)) _cache.delete(key);
+  }
+}
+
+// ==================== Rate Limiter ====================
+const _rateBuckets = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of _rateBuckets) {
+    if (now > rec.resetTime) _rateBuckets.delete(key);
+  }
+}, 60000);
+
+function rateLimiter(maxRequests, windowMs = 60000) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+
+    if (!_rateBuckets.has(ip)) {
+      _rateBuckets.set(ip, { count: 1, resetTime: now + windowMs });
+      return next();
+    }
+
+    const rec = _rateBuckets.get(ip);
+    if (now > rec.resetTime) {
+      rec.count = 1;
+      rec.resetTime = now + windowMs;
+      return next();
+    }
+
+    rec.count++;
+    if (rec.count > maxRequests) {
+      return res.status(429).json({
+        success: false,
+        message: 'عدد الطلبات كبير جداً، حاول بعد قليل'
+      });
+    }
+    next();
+  };
+}
+
+// ==================== Request Timeout Middleware ====================
+function requestTimeout(ms = 10000) {
+  return (req, res, next) => {
+    const timer = setTimeout(() => {
+      if (!res.headersSent) {
+        res.status(504).json({ success: false, message: 'انتهت مهلة الطلب' });
+      }
+    }, ms);
+
+    const cleanup = () => clearTimeout(timer);
+    res.on('finish', cleanup);
+    res.on('close', cleanup);
+    next();
+  };
+}
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/api', requestTimeout(10000));
+app.use('/api', rateLimiter(60));
+
+// تحويل إجمالي النقاط إلى خزانات (5→ethanol, 4→98, 3→95, 2→91, 1→diesel)
+function pointsToFuelTanks(totalPoints) {
+  const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+  let remaining = Math.max(0, Math.floor(Number(totalPoints) || 0));
+  while (remaining > 0) {
+    if (remaining >= 5) { fuel.ethanol++; remaining -= 5; }
+    else if (remaining >= 4) { fuel.fuel98++; remaining -= 4; }
+    else if (remaining >= 3) { fuel.fuel95++; remaining -= 3; }
+    else if (remaining >= 2) { fuel.fuel91++; remaining -= 2; }
+    else { fuel.diesel++; remaining -= 1; }
+  }
+  return fuel;
+}
+
+async function getSetting(key, defaultValue = null) {
+  try {
+    const row = await queryOne('SELECT value FROM app_settings WHERE key = ?', [String(key)]);
+    if (!row || row.value == null) return defaultValue;
+    return row.value;
+  } catch (e) {
+    return defaultValue;
+  }
+}
+
+async function getSettingBool(key, defaultValue = false) {
+  const val = await getSetting(key, defaultValue ? '1' : '0');
+  if (val === true || val === 1) return true;
+  if (val === false || val === 0) return false;
+  const s = String(val).toLowerCase().trim();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
+async function setSetting(key, value) {
+  await run(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`,
+    [String(key), value == null ? null : String(value)],
+    false
+  );
+}
 
 // Service Worker header
 app.get('/sw.js', (req, res) => {
@@ -25,15 +159,91 @@ app.get('/sw.js', (req, res) => {
 
 app.use(express.static(path.join(__dirname, '../frontend')));
 
+// ==================== Settings Routes ====================
+app.get('/api/settings', async (req, res) => {
+  try {
+    const rows = await queryAll(`SELECT key, value FROM app_settings`);
+    const settings = {};
+    for (const r of rows) settings[r.key] = r.value;
+    res.json({ success: true, settings });
+  } catch (e) {
+    res.status(400).json({ success: false, message: 'تعذر تحميل الإعدادات' });
+  }
+});
+
+app.post('/api/settings', async (req, res) => {
+  try {
+    const { key, value } = req.body || {};
+    if (!key) return res.status(400).json({ success: false, message: 'key مطلوب' });
+    await setSetting(key, value);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ success: false, message: 'تعذر حفظ الإعداد' });
+  }
+});
+
+app.get('/api/points-log', async (req, res) => {
+  try {
+    const limit = Math.min(500, Math.max(10, parseInt(req.query.limit || '200', 10) || 200));
+    const rows = await queryAll(`
+      SELECT pl.*, u.name as performed_by_name
+      FROM points_log pl
+      LEFT JOIN users u ON pl.performed_by = u.id
+      ORDER BY pl.id DESC
+      LIMIT ?
+    `, [limit]);
+    res.json({ success: true, rows });
+  } catch (e) {
+    res.status(400).json({ success: false, message: 'تعذر تحميل سجل العمليات' });
+  }
+});
+
+// ==================== Ops / Public Config ====================
+app.get('/healthz', async (req, res) => {
+  const mode = (process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN) ? 'turso' : 'local';
+  const onesignalConfigured = !!process.env.ONESIGNAL_APP_ID;
+  let dbOk = true;
+  try {
+    await queryOne('SELECT 1 as ok');
+  } catch (e) {
+    dbOk = false;
+  }
+  res.json({
+    ok: true,
+    dbOk,
+    mode,
+    env: process.env.NODE_ENV || 'development',
+    version: APP_VERSION,
+    onesignalConfigured,
+    uptimeSeconds: Math.floor(process.uptime())
+  });
+});
+
+app.get('/version', (req, res) => {
+  res.json({
+    version: APP_VERSION,
+    node: process.version,
+    env: process.env.NODE_ENV || 'development',
+    commit: process.env.RENDER_GIT_COMMIT || process.env.GIT_SHA || null
+  });
+});
+
+app.get('/api/public-config', (req, res) => {
+  res.json({
+    onesignalAppId: process.env.ONESIGNAL_APP_ID || null
+  });
+});
+
 // ==================== Auth Routes ====================
 
 // تسجيل دخول الأدمن
 app.post('/api/auth/admin', async (req, res) => {
   const { username, password } = req.body;
-  const user = await queryOne(`
-    SELECT id, name, role FROM users
-    WHERE username = '${username}' AND password = '${password}' AND role = 'admin'
-  `);
+  const user = await queryOne(
+    `SELECT id, name, role FROM users
+     WHERE username = ? AND password = ? AND role = 'admin'`,
+    [username, password]
+  );
 
   if (user) {
     res.json({ success: true, user });
@@ -45,12 +255,13 @@ app.post('/api/auth/admin', async (req, res) => {
 // تسجيل دخول بالرمز (مشرف أو طالب)
 app.post('/api/auth/code', async (req, res) => {
   const { code } = req.body;
-  const user = await queryOne(`
-    SELECT u.id, u.name, u.role, u.group_id, g.name as group_name
-    FROM users u
-    LEFT JOIN groups g ON u.group_id = g.id
-    WHERE u.code = '${code}'
-  `);
+  const user = await queryOne(
+    `SELECT u.id, u.name, u.role, u.group_id, g.name as group_name, COALESCE(u.points_hidden, 0) as points_hidden
+     FROM users u
+     LEFT JOIN groups g ON u.group_id = g.id
+     WHERE u.code = ?`,
+    [code]
+  );
 
   if (user) {
     res.json({ success: true, user });
@@ -71,24 +282,21 @@ app.get('/api/groups', async (req, res) => {
     GROUP BY g.id
   `);
 
-  // حساب نقاط كل أسرة
   for (let group of groups) {
-    // نقاط الأفراد (من الطلبات + التعديلات الفردية)
-    const membersPoints = await queryOne(`
-      SELECT COALESCE(SUM(
+    const membersPoints = await queryOne(
+      `SELECT COALESCE(SUM(
         COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
         COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)
       ), 0) as total
-      FROM users u WHERE u.group_id = ${group.id} AND u.role = 'student'
-    `);
-
-    // نقاط الأسرة المباشرة
-    const groupDirectPoints = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM group_points_adjustments
-      WHERE group_id = ${group.id}
-    `);
-
+      FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+      [group.id]
+    );
+    const groupDirectPoints = await queryOne(
+      `SELECT COALESCE(SUM(points), 0) as total
+       FROM group_points_adjustments
+       WHERE group_id = ?`,
+      [group.id]
+    );
     group.members_points = membersPoints?.total || 0;
     group.direct_points = groupDirectPoints?.total || 0;
     group.total_points = group.members_points + group.direct_points;
@@ -101,7 +309,7 @@ app.get('/api/groups', async (req, res) => {
 app.post('/api/groups', async (req, res) => {
   const { name } = req.body;
   try {
-    await run(`INSERT INTO groups (name) VALUES ('${name}')`);
+    await run('INSERT INTO groups (name) VALUES (?)', [name]);
     const id = await getLastInsertId();
     res.json({ success: true, id });
   } catch (error) {
@@ -113,65 +321,67 @@ app.post('/api/groups', async (req, res) => {
 app.put('/api/groups/:id', async (req, res) => {
   const { name } = req.body;
   try {
-    await run(`UPDATE groups SET name = '${name}' WHERE id = ${req.params.id}`);
+    await run('UPDATE groups SET name = ? WHERE id = ?', [name, req.params.id]);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في التعديل' });
   }
 });
 
-// جلب تفاصيل أسرة واحدة مع الخزانات
+// حذف أسرة
+app.delete('/api/groups/:id', async (req, res) => {
+  try {
+    await run('UPDATE users SET group_id = NULL WHERE group_id = ?', [req.params.id]);
+    await run('DELETE FROM groups WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
+  }
+});
+
+// جلب تفاصيل أسرة مع الخزانات
 app.get('/api/groups/:id/details', async (req, res) => {
   try {
-    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    const gid = req.params.id;
+    const group = await queryOne('SELECT * FROM groups WHERE id = ?', [gid]);
     if (!group) {
       return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
     }
 
-    // جلب أعضاء الأسرة
-    const members = await queryAll(`
-      SELECT u.id, u.name,
-      (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
-       COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
-      FROM users u WHERE u.group_id = ${req.params.id} AND u.role = 'student'
-    `);
+    const members = await queryAll(
+      `SELECT u.id, u.name,
+        (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+         COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
+       FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+      [gid]
+    );
 
-    // جلب نقاط الطلبات المقبولة لأعضاء الأسرة
-    const membersRequestsSum = await queryOne(`
-      SELECT COALESCE(SUM(r.points), 0) as total
-      FROM requests r
-      JOIN users u ON r.student_id = u.id
-      WHERE u.group_id = ${req.params.id} AND r.status = 'approved'
-    `);
+    const membersRequestsSum = await queryOne(
+      `SELECT COALESCE(SUM(r.points), 0) as total
+       FROM requests r
+       JOIN users u ON r.student_id = u.id
+       WHERE u.group_id = ? AND r.status = 'approved'`,
+      [gid]
+    );
+    const membersAdjustmentsSum = await queryOne(
+      `SELECT COALESCE(SUM(pa.points), 0) as total
+       FROM points_adjustments pa
+       JOIN users u ON pa.student_id = u.id
+       WHERE u.group_id = ?`,
+      [gid]
+    );
+    const directAdjustmentsSum = await queryOne(
+      `SELECT COALESCE(SUM(points), 0) as total
+       FROM group_points_adjustments
+       WHERE group_id = ?`,
+      [gid]
+    );
 
-    // جلب مجموع التعديلات اليدوية لجميع أعضاء الأسرة
-    const membersAdjustmentsSum = await queryOne(`
-      SELECT COALESCE(SUM(pa.points), 0) as total
-      FROM points_adjustments pa
-      JOIN users u ON pa.student_id = u.id
-      WHERE u.group_id = ${req.params.id}
-    `);
-
-    // نقاط الأسرة المباشرة
-    const directAdjustmentsSum = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM group_points_adjustments
-      WHERE group_id = ${req.params.id}
-    `);
-
-    const membersRequestsTotal = membersRequestsSum?.total || 0;
-    const membersAdjTotal = membersAdjustmentsSum?.total || 0;
+    const membersPointsTotal = (membersRequestsSum?.total || 0) + (membersAdjustmentsSum?.total || 0);
     const directTotal = directAdjustmentsSum?.total || 0;
-
-    // مجموع نقاط الأفراد (طلبات + تعديلات)
-    const membersPointsTotal = membersRequestsTotal + membersAdjTotal;
-
-    // المجموع الكلي للأسرة
     const grandTotal = membersPointsTotal + directTotal;
 
-    // توزيع المجموع الكلي على الخزانات
     const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-
     if (grandTotal > 0) {
       let remaining = grandTotal;
       while (remaining > 0) {
@@ -182,7 +392,6 @@ app.get('/api/groups/:id/details', async (req, res) => {
         else { fuel.diesel++; remaining -= 1; }
       }
     }
-    // إذا كان سالب، الخزانات تبقى فارغة
 
     res.json({
       ...group,
@@ -197,106 +406,169 @@ app.get('/api/groups/:id/details', async (req, res) => {
   }
 });
 
-// إضافة/خصم نقاط للأسرة مباشرة
+// إضافة/خصم نقاط للأسرة
 app.post('/api/groups/:id/points', async (req, res) => {
-  const { points, action, reason, apply_to_members, reviewer_id } = req.body;
-
-  if (!points || points < 1) {
-    return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
-  }
-
   try {
-    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    const { points, action, reason, apply_to_members, reviewer_id } = req.body || {};
+    const groupId = req.params.id;
+
+    if (!points || points < 1) {
+      return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
+    }
+
+    const group = await queryOne('SELECT * FROM groups WHERE id = ?', [groupId]);
     if (!group) {
       return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
     }
 
     const actualPoints = action === 'subtract' ? -points : points;
-    const safeReason = (reason || (action === 'add' ? 'إضافة نقاط للأسرة' : 'خصم نقاط من الأسرة')).replace(/'/g, "''");
+    const reasonText = reason || (action === 'add' ? 'إضافة نقاط للأسرة' : 'خصم نقاط من الأسرة');
+    const adjBy = (reviewer_id != null && reviewer_id !== '') ? reviewer_id : null;
 
-    // إذا كان الخيار توزيع على الأفراد - نضيف للأفراد (والباقي للأسرة مباشرة)
     if (apply_to_members) {
-      const members = await queryAll(`
-        SELECT id, name FROM users WHERE group_id = ${req.params.id} AND role = 'student'
-      `);
-
+      const members = await queryAll(
+        `SELECT u.id, u.name,
+          (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+           COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
+         FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+        [groupId]
+      );
       if (members.length === 0) {
         return res.status(400).json({ success: false, message: 'لا يوجد أعضاء في هذه الأسرة' });
       }
-
       const pointsPerMember = Math.floor(points / members.length);
-      const remainder = points % members.length; // الباقي الذي لا يقبل القسمة
+      const remainder = points % members.length;
 
-      if (pointsPerMember >= 1) {
-        for (const member of members) {
-          await run(`
-            INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-            VALUES (${member.id}, ${action === 'subtract' ? -pointsPerMember : pointsPerMember}, '${safeReason} (من الأسرة)', ${reviewer_id})
-          `);
+      if (action === 'add') {
+        await run(
+          `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+           VALUES (?, ?, 1, ?, ?)`,
+          [groupId, points, reasonText + ' (إضافة الأسرة)', adjBy]
+        );
+
+        for (let i = 0; i < members.length; i++) {
+          const member = members[i];
+          const add = pointsPerMember + (i < remainder ? 1 : 0);
+          if (add >= 1) {
+            await run(
+              `INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+               VALUES (?, ?, ?, ?)`,
+              [member.id, add, reasonText + ' (إضافة للأفراد)', adjBy]
+            );
+          }
+        }
+      } else {
+        const groupDirect = await queryOne(
+          'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
+          [groupId]
+        );
+        const directTotal = Number(groupDirect?.total ?? 0);
+        if (points > directTotal) {
+          return res.status(400).json({
+            success: false,
+            message: `نقاط الأسرة المباشرة (${directTotal}) أقل من المطلوب خصمه (${points}).`
+          });
+        }
+        await run(
+          `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+           VALUES (?, ?, 1, ?, ?)`,
+          [groupId, -points, reasonText + ' (خصم الأسرة)', adjBy]
+        );
+
+        const intendedById = new Map();
+        const deductedById = new Map();
+        for (let i = 0; i < members.length; i++) {
+          const intended = pointsPerMember + (i < remainder ? 1 : 0);
+          intendedById.set(members[i].id, intended);
+          deductedById.set(members[i].id, 0);
+        }
+
+        let shortfall = 0;
+        for (let i = 0; i < members.length; i++) {
+          const m = members[i];
+          const memberPoints = Math.max(0, Number.parseInt(m.total_points, 10) || 0);
+          const intended = intendedById.get(m.id) || 0;
+          const deduct = Math.min(intended, memberPoints);
+          if (deduct >= 1) {
+            await run(
+              `INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+               VALUES (?, ?, ?, ?)`,
+              [m.id, -deduct, reasonText + ' (خصم الأفراد)', adjBy]
+            );
+            deductedById.set(m.id, deduct);
+          }
+          shortfall += (intended - deduct);
+        }
+
+        if (shortfall > 0) {
+          for (let i = 0; i < members.length && shortfall > 0; i++) {
+            const m = members[i];
+            const memberPoints = Math.max(0, Number.parseInt(m.total_points, 10) || 0);
+            const already = deductedById.get(m.id) || 0;
+            const remainingCapacity = Math.max(0, memberPoints - already);
+            const extra = Math.min(remainingCapacity, shortfall);
+            if (extra >= 1) {
+              await run(
+                `INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+                 VALUES (?, ?, ?, ?)`,
+                [m.id, -extra, reasonText + ' (إكمال خصم الأفراد)', adjBy]
+              );
+              deductedById.set(m.id, already + extra);
+              shortfall -= extra;
+            }
+          }
         }
       }
-
-      // إذا كان هناك باقي، نضيفه للأسرة مباشرة حتى لا تضيع النقاط
-      if (remainder > 0) {
-        await run(`
-          INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-          VALUES (${req.params.id}, ${action === 'subtract' ? -remainder : remainder}, 1, '${safeReason} (باقي التوزيع)', ${reviewer_id})
-        `);
-      }
-
-      // إرسال إشعار لكل أعضاء الأسرة
-      const notifTitle = action === 'add' ? 'تم إضافة نقاط للأسرة 🎉' : 'تم خصم نقاط من الأسرة ⚠️';
-      const notifMessage = action === 'add'
-        ? `حصلت أسرتك "${group.name}" على ${points} نقاط! (${pointsPerMember} نقاط لكل فرد${remainder > 0 ? ` + ${remainder} للأسرة` : ''})`
-        : `تم خصم ${points} نقاط من أسرتك "${group.name}" (${pointsPerMember} نقاط من كل فرد${remainder > 0 ? ` + ${remainder} من الأسرة` : ''})`;
-
-      for (const member of members) {
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-        `);
-      }
     } else {
-      // إضافة للأسرة مباشرة (نقاط أسرة فقط - لا تُوزع على الأفراد)
-      await run(`
-        INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-        VALUES (${req.params.id}, ${actualPoints}, 0, '${safeReason}', ${reviewer_id})
-      `);
-
-      // إرسال إشعار لكل أعضاء الأسرة
-      const members = await queryAll(`
-        SELECT id FROM users WHERE group_id = ${req.params.id} AND role = 'student'
-      `);
-
-      const notifTitle = action === 'add' ? 'تم إضافة نقاط للأسرة 🎉' : 'تم خصم نقاط من الأسرة ⚠️';
-      const notifMessage = action === 'add'
-        ? `حصلت أسرتك "${group.name}" على ${points} نقاط مباشرة!`
-        : `تم خصم ${points} نقاط من أسرتك "${group.name}"`;
-
-      for (const member of members) {
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-        `);
+      if (action === 'subtract') {
+        const groupDirect = await queryOne('SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?', [groupId]);
+        const directTotal = groupDirect?.total || 0;
+        if (points > directTotal) {
+          return res.status(400).json({ success: false, message: `نقاط الأسرة المباشرة (${directTotal}) أقل من المطلوب خصمه (${points}). استخدم "خصم من الأفراد أيضاً" لخصم من نقاط الطلاب.` });
+        }
       }
+      await run(
+        `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+         VALUES (?, ?, 0, ?, ?)`,
+        [groupId, actualPoints, reasonText, adjBy]
+      );
     }
 
-    // تسجيل في سجل العمليات
-    await run(`
-      INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, reason, performed_by)
-      VALUES ('${action}', 'group', ${req.params.id}, ${req.params.id}, ${points}, '${safeReason}', ${reviewer_id})
-    `);
+    try {
+      await run(
+        `INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, reason, performed_by)
+         VALUES (?, 'group', ?, ?, ?, ?, ?)`,
+        [action, groupId, groupId, points, reasonText, adjBy]
+      );
+    } catch (e) { /* points_log اختياري */ }
 
-    res.json({ success: true, message: `تم ${action === 'add' ? 'إضافة' : 'خصم'} ${points} نقاط ${apply_to_members ? '(موزعة على الأفراد)' : '(للأسرة مباشرة)'}` });
+    // إشعارات داخل التطبيق لأعضاء الأسرة
+    const allMembers = await queryAll('SELECT id FROM users WHERE group_id = ? AND role = ?', [groupId, 'student']);
+    const notifTitle = action === 'add' ? 'تم إضافة نقاط للأسرة 🎉' : 'تم خصم نقاط من الأسرة ⚠️';
+    const notifMessage = action === 'add'
+      ? `حصلت أسرتك "${group.name || ''}" على ${points} نقاط${apply_to_members ? ' (موزعة على الأفراد)' : ''}`
+      : `تم خصم ${points} نقاط من أسرتك "${group.name || ''}"${apply_to_members ? ' (من الأفراد)' : ''}`;
+    for (const m of allMembers) {
+      try {
+        await run(
+          'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+          [m.id, notifTitle, notifMessage]
+        );
+      } catch (e) { /* تجاهل */ }
+    }
+
+    return res.json({ success: true, message: `تم ${action === 'add' ? 'إضافة' : 'خصم'} ${points} نقاط ${apply_to_members ? '(موزعة على الأفراد)' : '(للأسرة مباشرة)'}` });
   } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
+    console.error('groups/:id/points error:', error);
+    return res.status(400).json({ success: false, message: error.message || 'حدث خطأ أثناء تنفيذ العملية' });
   }
 });
 
 // زيادة أو خصم مئوي للأسرة
 app.post('/api/groups/:id/percentage', async (req, res) => {
   const { percentage, apply_to_members, reason, reviewer_id, action } = req.body;
-  // action: 'add' للزيادة أو 'subtract' للخصم
+  const gid = req.params.id;
+  const adjBy = reviewer_id || null;
 
   if (!percentage || percentage <= 0) {
     return res.status(400).json({ success: false, message: 'يجب تحديد نسبة صحيحة' });
@@ -305,118 +577,89 @@ app.post('/api/groups/:id/percentage', async (req, res) => {
   const isSubtract = action === 'subtract';
 
   try {
-    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    const group = await queryOne('SELECT * FROM groups WHERE id = ?', [gid]);
     if (!group) {
       return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
     }
 
-    const safeReason = (reason || `${isSubtract ? 'خصم' : 'زيادة'} ${percentage}%`).replace(/'/g, "''");
-    let totalChanged = 0;
-    let groupBonus = 0;
+    const reasonText = reason || `${isSubtract ? 'خصم' : 'زيادة'} ${percentage}%`;
 
-    // جلب كل أعضاء الأسرة مع نقاطهم
-    const members = await queryAll(`
-      SELECT u.id, u.name,
-      (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
-       COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
-      FROM users u WHERE u.group_id = ${req.params.id} AND u.role = 'student'
-    `);
+    const members = await queryAll(
+      `SELECT u.id, u.name,
+        (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
+         COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
+       FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+      [gid]
+    );
+    const directPoints = await queryOne(
+      'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
+      [gid]
+    );
+    const directTotal = Number(directPoints?.total ?? 0);
+    const directDelta = Math.floor((directTotal * percentage) / 100);
 
-    if (apply_to_members) {
-      // النسبة تُحسب على نقاط كل فرد وتضاف/تخصم للأفراد فقط
-      for (const member of members) {
-        const change = Math.floor((member.total_points * percentage) / 100);
-        if (change >= 1) {
-          // التحقق من إمكانية الخصم
-          if (isSubtract && member.total_points < change) {
-            continue; // تخطي هذا العضو إذا لم يكن لديه نقاط كافية
+    if (isSubtract) {
+      if (apply_to_members) {
+        const pointsToDeduct = Math.min(directDelta, directTotal);
+        if (pointsToDeduct >= 1) {
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, ?, 1, 1, ?, ?)`,
+            [gid, -pointsToDeduct, percentage, reasonText + ' (خصم الأسرة)', adjBy]
+          );
+        }
+
+        for (const member of members) {
+          const change = Math.floor((member.total_points * percentage) / 100);
+          if (change >= 1 && member.total_points >= change) {
+            await run(
+              'INSERT INTO points_adjustments (student_id, points, reason, adjusted_by) VALUES (?, ?, ?, ?)',
+              [member.id, -change, reasonText, adjBy]
+            );
           }
-          await run(`
-            INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-            VALUES (${member.id}, ${isSubtract ? -change : change}, '${safeReason}', ${reviewer_id})
-          `);
-          totalChanged += change;
+        }
+      } else {
+        const pointsToDeduct = Math.min(directDelta, directTotal);
+        if (pointsToDeduct >= 1) {
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, ?, 1, 0, ?, ?)`,
+            [gid, -pointsToDeduct, percentage, reasonText, adjBy]
+          );
         }
       }
-
-      // إرسال إشعار للأعضاء
-      const notifTitle = isSubtract ? 'خصم مئوي من الأسرة! 📉' : 'زيادة مئوية للأسرة! 📈';
-      const notifMessage = isSubtract
-        ? `تم خصم ${percentage}% من أسرتك "${group.name}" (مجموع ${totalChanged} نقطة من الأفراد)`
-        : `حصلت أسرتك "${group.name}" على زيادة ${percentage}% (مجموع ${totalChanged} نقطة موزعة على الأفراد)`;
-
-      for (const member of members) {
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-        `);
-      }
     } else {
-      // حساب النقاط الكلية للأسرة (أفراد + مباشر) وإضافة/خصم النسبة للأسرة مباشرة
-      const membersTotal = members.reduce((sum, m) => sum + (m.total_points || 0), 0);
-
-      // جلب نقاط الأسرة المباشرة
-      const directPoints = await queryOne(`
-        SELECT COALESCE(SUM(points), 0) as total
-        FROM group_points_adjustments
-        WHERE group_id = ${req.params.id}
-      `);
-      const directTotal = directPoints?.total || 0;
-
-      // المجموع الكلي = أفراد + مباشر
-      const groupTotal = membersTotal + directTotal;
-      groupBonus = Math.floor((groupTotal * percentage) / 100);
-
-      if (groupBonus >= 1) {
-        // إضافة/خصم للأسرة مباشرة
-        await run(`
-          INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
-          VALUES (${req.params.id}, ${isSubtract ? -groupBonus : groupBonus}, ${percentage}, 1, 0, '${safeReason}', ${reviewer_id})
-        `);
+      if (directDelta >= 1) {
+        await run(
+          `INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+           VALUES (?, ?, ?, 1, ?, ?, ?)`,
+          [gid, directDelta, percentage, apply_to_members ? 1 : 0, reasonText, adjBy]
+        );
       }
-
-      // إرسال إشعار للأعضاء
-      const notifTitle = isSubtract ? 'خصم مئوي من الأسرة! 📉' : 'زيادة مئوية للأسرة! 📈';
-      const notifMessage = isSubtract
-        ? `تم خصم ${percentage}% من أسرتك "${group.name}" (${groupBonus} نقطة من الأسرة مباشرة)`
-        : `حصلت أسرتك "${group.name}" على زيادة ${percentage}% (${groupBonus} نقطة للأسرة مباشرة)`;
-
-      for (const member of members) {
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${member.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-        `);
+      if (apply_to_members) {
+        for (const member of members) {
+          const change = Math.floor((member.total_points * percentage) / 100);
+          if (change >= 1) {
+            await run(
+              'INSERT INTO points_adjustments (student_id, points, reason, adjusted_by) VALUES (?, ?, ?, ?)',
+              [member.id, change, reasonText, adjBy]
+            );
+          }
+        }
       }
     }
 
-    // تسجيل في سجل العمليات
-    await run(`
-      INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, percentage, reason, performed_by)
-      VALUES ('${isSubtract ? 'percentage_subtract' : 'percentage_add'}', 'group', ${req.params.id}, ${req.params.id}, ${apply_to_members ? totalChanged : groupBonus}, ${percentage}, '${safeReason}', ${reviewer_id})
-    `);
+    try {
+      await run(
+        `INSERT INTO points_log (operation_type, target_type, target_id, group_id, percentage, reason, performed_by)
+         VALUES (?, 'group', ?, ?, ?, ?, ?)`,
+        ['percentage_' + action, gid, gid, percentage, reasonText, adjBy]
+      );
+    } catch (e) { /* ignore */ }
 
-    const actionWord = isSubtract ? 'خصم' : 'إضافة';
-    res.json({
-      success: true,
-      message: apply_to_members
-        ? `تم ${actionWord} ${percentage}% (${totalChanged} نقطة ${isSubtract ? 'من' : 'موزعة على'} الأفراد)`
-        : `تم ${actionWord} ${percentage}% (${groupBonus} نقطة ${isSubtract ? 'من' : 'إلى'} الأسرة مباشرة)`,
-      group_bonus: groupBonus,
-      members_bonus: totalChanged
-    });
+    res.json({ success: true, message: action === 'subtract' ? 'تم تطبيق الخصم المئوي بنجاح' : 'تم تطبيق الزيادة المئوية بنجاح' });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-// حذف أسرة
-app.delete('/api/groups/:id', async (req, res) => {
-  try {
-    await run(`UPDATE users SET group_id = NULL WHERE group_id = ${req.params.id}`);
-    await run(`DELETE FROM groups WHERE id = ${req.params.id}`);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
   }
 });
 
@@ -435,7 +678,7 @@ app.post('/api/supervisors', async (req, res) => {
   const { name } = req.body;
   const code = await generateCode();
   try {
-    await run(`INSERT INTO users (name, code, role) VALUES ('${name}', '${code}', 'supervisor')`);
+    await run('INSERT INTO users (name, code, role) VALUES (?, ?, ?)', [name, code, 'supervisor']);
     const id = await getLastInsertId();
     res.json({ success: true, id, code });
   } catch (error) {
@@ -446,7 +689,7 @@ app.post('/api/supervisors', async (req, res) => {
 // حذف مشرف
 app.delete('/api/supervisors/:id', async (req, res) => {
   try {
-    await run(`DELETE FROM users WHERE id = ${req.params.id} AND role = 'supervisor'`);
+    await run('DELETE FROM users WHERE id = ? AND role = ?', [req.params.id, 'supervisor']);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
@@ -471,9 +714,26 @@ app.post('/api/students', async (req, res) => {
   const { name, group_id } = req.body;
   const code = await generateCode();
   try {
-    const groupVal = group_id ? group_id : 'NULL';
-    await run(`INSERT INTO users (name, code, role, group_id) VALUES ('${name}', '${code}', 'student', ${groupVal})`);
+    await run('INSERT INTO users (name, code, role, group_id) VALUES (?, ?, ?, ?)', [name, code, 'student', group_id || null]);
     const id = await getLastInsertId();
+
+    let groupName = null;
+    if (group_id) {
+      const group = await queryOne('SELECT name FROM groups WHERE id = ?', [group_id]);
+      groupName = group ? group.name : null;
+    }
+
+    await notifyNewStudent(id, name, code);
+
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [id, 'مرحباً بك في نظام سلطان! 🎉', `أهلاً ${name}! رمز دخولك هو: ${code}`]
+    );
+
+    const supervisors = await queryAll("SELECT id FROM users WHERE role = 'supervisor'");
+    const admins = await queryAll("SELECT id FROM users WHERE role = 'admin'");
+    await notifyNewStudentToSupervisors(name, groupName, supervisors.map(s => s.id), admins.map(a => a.id));
+
     res.json({ success: true, id, code });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الإنشاء' });
@@ -483,9 +743,36 @@ app.post('/api/students', async (req, res) => {
 // تعديل طالب
 app.put('/api/students/:id', async (req, res) => {
   const { name, group_id } = req.body;
+  const sid = req.params.id;
   try {
-    const groupVal = group_id ? group_id : 'NULL';
-    await run(`UPDATE users SET name = '${name}', group_id = ${groupVal} WHERE id = ${req.params.id}`);
+    const currentStudent = await queryOne(
+      `SELECT u.group_id, g.name as group_name FROM users u LEFT JOIN groups g ON u.group_id = g.id WHERE u.id = ?`,
+      [sid]
+    );
+
+    await run('UPDATE users SET name = ?, group_id = ? WHERE id = ?', [name, group_id || null, sid]);
+
+    if (currentStudent && String(currentStudent.group_id) !== String(group_id)) {
+      let newGroupName = null;
+      if (group_id) {
+        const newGroup = await queryOne('SELECT name FROM groups WHERE id = ?', [group_id]);
+        newGroupName = newGroup ? newGroup.name : null;
+      }
+
+      if (newGroupName) {
+        await notifyGroupChanged(sid, newGroupName, currentStudent.group_name);
+
+        const message = currentStudent.group_name
+          ? `تم نقلك من أسرة "${currentStudent.group_name}" إلى أسرة "${newGroupName}"`
+          : `تم إضافتك إلى أسرة "${newGroupName}"`;
+
+        await run(
+          'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+          [sid, 'تغيير الأسرة 👥', message]
+        );
+      }
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في التعديل' });
@@ -495,7 +782,7 @@ app.put('/api/students/:id', async (req, res) => {
 // حذف طالب
 app.delete('/api/students/:id', async (req, res) => {
   try {
-    await run(`DELETE FROM users WHERE id = ${req.params.id} AND role = 'student'`);
+    await run('DELETE FROM users WHERE id = ? AND role = ?', [req.params.id, 'student']);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
@@ -504,15 +791,14 @@ app.delete('/api/students/:id', async (req, res) => {
 
 // تعديل نقاط طالب (إضافة أو خصم)
 app.post('/api/students/:id/points', async (req, res) => {
-  const { points, action, reason, reviewer_id, apply_to_group, group_id } = req.body;
-  // action: 'add' للإضافة أو 'subtract' للخصم
+  const { points, action, reason, reviewer_id } = req.body;
+  const sid = req.params.id;
 
   if (!points || points < 1) {
     return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
   }
 
   try {
-    // التأكد من وجود جدول التعديلات اليدوية
     await run(`
       CREATE TABLE IF NOT EXISTS points_adjustments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -524,29 +810,24 @@ app.post('/api/students/:id/points', async (req, res) => {
       )
     `, false);
 
-    // جلب النقاط الحالية (من الطلبات + التعديلات اليدوية)
-    const requestsPoints = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM requests
-      WHERE student_id = ${req.params.id} AND status = 'approved'
-    `);
+    const requestsPoints = await queryOne(
+      "SELECT COALESCE(SUM(points), 0) as total FROM requests WHERE student_id = ? AND status = 'approved'",
+      [sid]
+    );
 
     let adjustmentsTotal = 0;
     try {
-      const adjustmentsPoints = await queryOne(`
-        SELECT COALESCE(SUM(points), 0) as total
-        FROM points_adjustments
-        WHERE student_id = ${req.params.id}
-      `);
+      const adjustmentsPoints = await queryOne(
+        'SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments WHERE student_id = ?',
+        [sid]
+      );
       adjustmentsTotal = adjustmentsPoints?.total || 0;
     } catch (e) {
-      // الجدول قد لا يكون موجوداً بعد
       adjustmentsTotal = 0;
     }
 
     const currentPoints = (requestsPoints?.total || 0) + adjustmentsTotal;
 
-    // التحقق من إمكانية الخصم
     if (action === 'subtract' && currentPoints < points) {
       return res.status(400).json({
         success: false,
@@ -555,46 +836,50 @@ app.post('/api/students/:id/points', async (req, res) => {
     }
 
     const actualPoints = action === 'subtract' ? -points : points;
-    const safeReason = (reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي')).replace(/'/g, "''");
+    const reasonText = reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي');
 
-    // إنشاء سجل تعديل النقاط في الجدول الجديد
-    await run(`
-      INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-      VALUES (${req.params.id}, ${actualPoints}, '${safeReason}', ${reviewer_id})
-    `);
+    await run(
+      'INSERT INTO points_adjustments (student_id, points, reason, adjusted_by) VALUES (?, ?, ?, ?)',
+      [sid, actualPoints, reasonText, reviewer_id]
+    );
 
-    // إذا كان الخيار مفعل - إضافة النقاط للأسرة أيضاً
-    if (apply_to_group && group_id) {
-      await run(`
-        INSERT INTO group_points_adjustments (group_id, points, reason, adjusted_by, apply_to_members)
-        VALUES (${group_id}, ${actualPoints}, '${safeReason} (من الطالب)', ${reviewer_id}, 0)
-      `);
-    }
+    try {
+      const student = await queryOne('SELECT group_id FROM users WHERE id = ?', [sid]);
+      const groupId = student?.group_id;
+      if (groupId) {
+        const pourManual = await getSettingBool('pour_manual_adjustments_to_group', false);
+        const pourAddOnly = await getSettingBool('auto_pour_add_points_to_group', false);
+        const shouldPour = pourManual ? true : (pourAddOnly && action === 'add');
 
-    // حساب النقاط الجديدة
+        if (shouldPour) {
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, 0, ?, ?)`,
+            [groupId, actualPoints, reasonText + ' (صب تلقائي للأسرة)', reviewer_id]
+          );
+        }
+      }
+    } catch (e) { /* ignore */ }
+
     const newPoints = currentPoints + actualPoints;
-
-    // تحديد نوع الوقود بناءً على النقاط (الحد الأقصى 5)
     const fuelLevel = Math.min(Math.max(newPoints, 0), 5);
     const fuelType = fuelLevel > 0 ? pointsToFuel(fuelLevel) : { name: 'لا يوجد', emoji: '⚫' };
 
-    // إرسال إشعار للطالب
     if (action === 'add') {
-      await notifyPointsAdded(req.params.id, points, newPoints, fuelType.name, fuelType.emoji, reason);
+      await notifyPointsAdded(sid, points, newPoints, fuelType.name, fuelType.emoji, reason);
     } else {
-      await notifyPointsSubtracted(req.params.id, points, newPoints, fuelType.name, fuelType.emoji, reason);
+      await notifyPointsSubtracted(sid, points, newPoints, fuelType.name, fuelType.emoji, reason);
     }
 
-    // إنشاء إشعار في قاعدة البيانات أيضاً
     const notifTitle = action === 'add' ? 'تم إضافة نقاط ➕' : 'تم خصم نقاط ➖';
     const notifMessage = action === 'add'
       ? `حصلت على ${points} نقاط! وقودك الآن: ${fuelType.emoji} ${fuelType.name}`
       : `تم خصم ${points} نقاط. وقودك الآن: ${fuelType.emoji} ${fuelType.name}`;
 
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${req.params.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [sid, notifTitle, notifMessage]
+    );
 
     res.json({
       success: true,
@@ -608,50 +893,143 @@ app.post('/api/students/:id/points', async (req, res) => {
   }
 });
 
+// تبديل حالة إخفاء النقاط للطالب
+app.post('/api/students/:id/toggle-points-visibility', async (req, res) => {
+  const { hidden, reason } = req.body;
+  const sid = req.params.id;
+
+  try {
+    await run('UPDATE users SET points_hidden = ? WHERE id = ?', [hidden ? 1 : 0, sid]);
+
+    await notifyPointsVisibilityChanged(sid, hidden, reason);
+
+    const notifTitle = hidden ? 'تم إخفاء نقاطك 🚫' : 'تم إظهار نقاطك ✅';
+    const notifMessage = hidden
+      ? `تم منعك من رؤية نقاطك مؤقتاً${reason ? '. السبب: ' + reason : ''}`
+      : 'يمكنك الآن رؤية نقاطك مرة أخرى';
+
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [sid, notifTitle, notifMessage]
+    );
+
+    res.json({ success: true, points_hidden: hidden });
+  } catch (error) {
+    console.error('خطأ في تغيير حالة إخفاء النقاط:', error);
+    res.status(400).json({ success: false, message: 'حدث خطأ' });
+  }
+});
+
 // ==================== Requests Routes ====================
 
 // جلب طلبات طالب معين
 app.get('/api/requests/student/:studentId', async (req, res) => {
-  const requests = await queryAll(`
-    SELECT r.*, u.name as reviewer_name
-    FROM requests r
-    LEFT JOIN users u ON r.reviewed_by = u.id
-    WHERE r.student_id = ${req.params.studentId}
-    ORDER BY r.created_at DESC
-  `);
+  const requests = await queryAll(
+    `SELECT r.*, u.name as reviewer_name
+     FROM requests r
+     LEFT JOIN users u ON r.reviewed_by = u.id
+     WHERE r.student_id = ?
+     ORDER BY r.created_at DESC`,
+    [req.params.studentId]
+  );
   res.json(requests);
 });
 
-// جلب كل الطلبات (للمشرف)
+// جلب كل الطلبات (للمشرف) - مع cursor-based pagination
 app.get('/api/requests', async (req, res) => {
-  const { status } = req.query;
-  let query = `
-    SELECT r.*, u.name as student_name, g.name as group_name, rev.name as reviewer_name
-    FROM requests r
-    JOIN users u ON r.student_id = u.id
-    LEFT JOIN groups g ON u.group_id = g.id
-    LEFT JOIN users rev ON r.reviewed_by = rev.id
-  `;
+  try {
+    const { status, cursor, limit: limitParam } = req.query;
+    const limit = Math.min(Math.max(parseInt(limitParam) || 50, 1), 100);
 
-  if (status) {
-    query += ` WHERE r.status = '${status}'`;
+    let cursorId = null;
+    if (cursor) {
+      try {
+        cursorId = JSON.parse(Buffer.from(cursor, 'base64').toString()).id;
+      } catch (e) {
+        return res.status(400).json({ success: false, message: 'Invalid cursor' });
+      }
+    }
+
+    const conditions = [];
+    const params = [];
+
+    if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+      conditions.push('r.status = ?');
+      params.push(status);
+    }
+
+    if (cursorId != null) {
+      conditions.push('r.id < ?');
+      params.push(cursorId);
+    }
+
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    params.push(limit + 1);
+
+    const rows = await queryWithTimeout(
+      `SELECT r.*, u.name as student_name, g.name as group_name, rev.name as reviewer_name
+       FROM requests r
+       JOIN users u ON r.student_id = u.id
+       LEFT JOIN groups g ON u.group_id = g.id
+       LEFT JOIN users rev ON r.reviewed_by = rev.id
+       ${whereClause}
+       ORDER BY r.id DESC
+       LIMIT ?`,
+      params
+    );
+
+    const hasNextPage = rows.length > limit;
+    const data = hasNextPage ? rows.slice(0, limit) : rows;
+
+    let nextCursor = null;
+    if (hasNextPage && data.length > 0) {
+      nextCursor = Buffer.from(JSON.stringify({ id: data[data.length - 1].id })).toString('base64');
+    }
+
+    // Cached count query
+    const countCacheKey = `requests_count_${status || 'all'}`;
+    let totalCount = cacheGet(countCacheKey);
+    if (totalCount === undefined) {
+      const countParams = [];
+      let countWhere = '';
+      if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+        countWhere = 'WHERE status = ?';
+        countParams.push(status);
+      }
+      const countResult = await queryOne(`SELECT COUNT(*) as count FROM requests ${countWhere}`, countParams);
+      totalCount = countResult ? countResult.count : 0;
+      cacheSet(countCacheKey, totalCount, 30000);
+    }
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        limit,
+        hasNextPage,
+        nextCursor,
+        totalCount
+      }
+    });
+  } catch (error) {
+    if (error.message === 'DATABASE_TIMEOUT') {
+      return res.status(504).json({ success: false, message: 'انتهت مهلة قاعدة البيانات' });
+    }
+    console.error('GET /api/requests error:', error);
+    res.status(500).json({ success: false, message: 'خطأ في جلب الطلبات' });
   }
-  query += ' ORDER BY r.created_at DESC';
-
-  const requests = await queryAll(query);
-  res.json(requests);
 });
 
 // إنشاء طلب جديد
 app.post('/api/requests', async (req, res) => {
   const { student_id, committee, description, points } = req.body;
 
-  // التحقق من الحد الأسبوعي
   const weekNumber = getWeekNumber();
-  const currentWeekRequests = await queryOne(`
-    SELECT COUNT(*) as count FROM requests
-    WHERE student_id = ${student_id} AND week_number = ${weekNumber}
-  `);
+  const currentWeekRequests = await queryOne(
+    'SELECT COUNT(*) as count FROM requests WHERE student_id = ? AND week_number = ?',
+    [student_id, weekNumber]
+  );
 
   if (currentWeekRequests && currentWeekRequests.count >= 20) {
     return res.status(400).json({
@@ -661,23 +1039,29 @@ app.post('/api/requests', async (req, res) => {
   }
 
   try {
-    const safeDesc = description.replace(/'/g, "''");
-    await run(`
-      INSERT INTO requests (student_id, committee, description, points, week_number)
-      VALUES (${student_id}, '${committee}', '${safeDesc}', ${points}, ${weekNumber})
-    `);
+    await run(
+      'INSERT INTO requests (student_id, committee, description, points, week_number) VALUES (?, ?, ?, ?, ?)',
+      [student_id, committee, description, points, weekNumber]
+    );
     const id = await getLastInsertId();
 
-    // إرسال إشعار للمشرفين والأدمن بوجود طلب جديد
-    const student = await queryOne(`SELECT name FROM users WHERE id = ${student_id}`);
+    const student = await queryOne('SELECT name FROM users WHERE id = ?', [student_id]);
 
-    // جلب معرفات المشرفين والأدمن
-    const supervisors = await queryAll(`SELECT id FROM users WHERE role = 'supervisor'`);
-    const admins = await queryAll(`SELECT id FROM users WHERE role = 'admin'`);
-    const supervisorIds = supervisors.map(s => s.id);
-    const adminIds = admins.map(a => a.id);
+    const supervisors = await queryAll("SELECT id FROM users WHERE role = 'supervisor'");
+    const admins = await queryAll("SELECT id FROM users WHERE role = 'admin'");
 
-    await notifyNewRequest(student ? student.name : 'طالب', supervisorIds, adminIds);
+    await notifyNewRequest(student ? student.name : 'طالب', supervisors.map(s => s.id), admins.map(a => a.id));
+
+    const newCount = (currentWeekRequests?.count || 0) + 1;
+    if (newCount >= 20) {
+      await notifyWeeklyLimitReached(student_id);
+      await run(
+        'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+        [student_id, 'وصلت للحد الأسبوعي ⚠️', 'لقد وصلت للحد الأقصى من الطلبات هذا الأسبوع (20 طلب). انتظر الأسبوع القادم!']
+      );
+    }
+
+    cacheInvalidate('requests_');
 
     res.json({ success: true, id });
   } catch (error) {
@@ -688,23 +1072,37 @@ app.post('/api/requests', async (req, res) => {
 // قبول طلب
 app.post('/api/requests/:id/approve', async (req, res) => {
   const { reviewer_id } = req.body;
+  const rid = req.params.id;
   try {
-    await run(`
-      UPDATE requests
-      SET status = 'approved', reviewed_by = ${reviewer_id}, reviewed_at = datetime('now')
-      WHERE id = ${req.params.id}
-    `);
+    await run(
+      "UPDATE requests SET status = 'approved', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?",
+      [reviewer_id, rid]
+    );
 
-    // إنشاء إشعار للطالب
-    const request = await queryOne(`SELECT student_id, points FROM requests WHERE id = ${req.params.id}`);
+    const request = await queryOne('SELECT student_id, points FROM requests WHERE id = ?', [rid]);
     const fuel = pointsToFuel(request.points);
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${request.student_id}, 'تم قبول طلبك ✅', 'حصلت على 1 لتر ${fuel.name} ${fuel.emoji}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [request.student_id, 'تم قبول طلبك ✅', `حصلت على 1 لتر ${fuel.name} ${fuel.emoji}`]
+    );
 
-    // إرسال Push Notification
+    try {
+      const pourApproved = await getSettingBool('pour_approved_requests_to_group', false);
+      if (pourApproved) {
+        const st = await queryOne('SELECT group_id FROM users WHERE id = ?', [request.student_id]);
+        if (st?.group_id) {
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, 0, ?, ?)`,
+            [st.group_id, request.points, 'صب طلب مقبول (تلقائي)', reviewer_id]
+          );
+        }
+      }
+    } catch (e) { /* ignore */ }
+
     await notifyRequestApproved(request.student_id, fuel.name, fuel.emoji);
+
+    cacheInvalidate('requests_');
 
     res.json({ success: true });
   } catch (error) {
@@ -715,24 +1113,23 @@ app.post('/api/requests/:id/approve', async (req, res) => {
 // رفض طلب
 app.post('/api/requests/:id/reject', async (req, res) => {
   const { reviewer_id, rejection_reason } = req.body;
+  const rid = req.params.id;
   try {
-    const reason = rejection_reason ? `'${rejection_reason.replace(/'/g, "''")}'` : 'NULL';
-    await run(`
-      UPDATE requests
-      SET status = 'rejected', reviewed_by = ${reviewer_id}, reviewed_at = datetime('now'), rejection_reason = ${reason}
-      WHERE id = ${req.params.id}
-    `);
+    await run(
+      "UPDATE requests SET status = 'rejected', reviewed_by = ?, reviewed_at = datetime('now'), rejection_reason = ? WHERE id = ?",
+      [reviewer_id, rejection_reason || null, rid]
+    );
 
-    // إنشاء إشعار للطالب
-    const request = await queryOne(`SELECT student_id FROM requests WHERE id = ${req.params.id}`);
+    const request = await queryOne('SELECT student_id FROM requests WHERE id = ?', [rid]);
     const message = rejection_reason ? `السبب: ${rejection_reason}` : 'لم يتم تحديد سبب';
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${request.student_id}, 'تم رفض طلبك ❌', '${message.replace(/'/g, "''")}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [request.student_id, 'تم رفض طلبك ❌', message]
+    );
 
-    // إرسال Push Notification
     await notifyRequestRejected(request.student_id, rejection_reason);
+
+    cacheInvalidate('requests_');
 
     res.json({ success: true });
   } catch (error) {
@@ -744,93 +1141,28 @@ app.post('/api/requests/:id/reject', async (req, res) => {
 
 // إحصائيات طالب
 app.get('/api/stats/student/:studentId', async (req, res) => {
-  const fuel = {
-    diesel: 0,
-    fuel91: 0,
-    fuel95: 0,
-    fuel98: 0,
-    ethanol: 0
-  };
-
-  // جلب الطلبات المقبولة
-  const approvedRequests = await queryAll(`
-    SELECT points FROM requests
-    WHERE student_id = ${req.params.studentId} AND status = 'approved'
-  `);
-
-  approvedRequests.forEach(r => {
-    switch(r.points) {
-      case 1: fuel.diesel++; break;
-      case 2: fuel.fuel91++; break;
-      case 3: fuel.fuel95++; break;
-      case 4: fuel.fuel98++; break;
-      case 5: fuel.ethanol++; break;
-    }
-  });
-
-  // جلب التعديلات اليدوية - جمع المجموع الكلي
-  const adjustmentsSum = await queryOne(`
-    SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments
-    WHERE student_id = ${req.params.studentId}
-  `);
-
-  let adjustmentTotal = adjustmentsSum?.total || 0;
-
-  // توزيع مجموع التعديلات على الخزانات
-  if (adjustmentTotal > 0) {
-    // إضافة - نوزع على الخزانات من الأعلى للأقل
-    let remaining = adjustmentTotal;
-    while (remaining > 0) {
-      if (remaining >= 5) { fuel.ethanol++; remaining -= 5; }
-      else if (remaining >= 4) { fuel.fuel98++; remaining -= 4; }
-      else if (remaining >= 3) { fuel.fuel95++; remaining -= 3; }
-      else if (remaining >= 2) { fuel.fuel91++; remaining -= 2; }
-      else { fuel.diesel++; remaining -= 1; }
-    }
-  } else if (adjustmentTotal < 0) {
-    // خصم - نخصم من الخزانات من الأعلى للأقل
-    let toDeduct = Math.abs(adjustmentTotal);
-
-    // خصم من إيثانول أولاً
-    if (fuel.ethanol >= toDeduct) { fuel.ethanol -= toDeduct; toDeduct = 0; }
-    else { toDeduct -= fuel.ethanol; fuel.ethanol = 0; }
-
-    // ثم من 98
-    if (toDeduct > 0) {
-      if (fuel.fuel98 >= toDeduct) { fuel.fuel98 -= toDeduct; toDeduct = 0; }
-      else { toDeduct -= fuel.fuel98; fuel.fuel98 = 0; }
-    }
-
-    // ثم من 95
-    if (toDeduct > 0) {
-      if (fuel.fuel95 >= toDeduct) { fuel.fuel95 -= toDeduct; toDeduct = 0; }
-      else { toDeduct -= fuel.fuel95; fuel.fuel95 = 0; }
-    }
-
-    // ثم من 91
-    if (toDeduct > 0) {
-      if (fuel.fuel91 >= toDeduct) { fuel.fuel91 -= toDeduct; toDeduct = 0; }
-      else { toDeduct -= fuel.fuel91; fuel.fuel91 = 0; }
-    }
-
-    // ثم من ديزل
-    if (toDeduct > 0) {
-      fuel.diesel = Math.max(0, fuel.diesel - toDeduct);
-    }
-  }
+  const sid = req.params.studentId;
+  const approvedSum = await queryOne(
+    "SELECT COALESCE(SUM(points), 0) as total FROM requests WHERE student_id = ? AND status = 'approved'",
+    [sid]
+  );
+  const adjustmentsSum = await queryOne(
+    'SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments WHERE student_id = ?',
+    [sid]
+  );
+  const totalPoints = Number(approvedSum?.total ?? 0) + Number(adjustmentsSum?.total ?? 0);
+  const fuel = pointsToFuelTanks(totalPoints);
 
   const weekNumber = getWeekNumber();
-  const weeklyRequests = await queryOne(`
-    SELECT COUNT(*) as count FROM requests
-    WHERE student_id = ${req.params.studentId} AND week_number = ${weekNumber}
-  `);
-
-  // حساب النقاط الكلية (كل خزان × قيمته)
-  const totalPoints = (fuel.diesel * 1) + (fuel.fuel91 * 2) + (fuel.fuel95 * 3) + (fuel.fuel98 * 4) + (fuel.ethanol * 5);
+  const weeklyRequests = await queryOne(
+    'SELECT COUNT(*) as count FROM requests WHERE student_id = ? AND week_number = ?',
+    [sid, weekNumber]
+  );
 
   res.json({
     fuel,
     totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol,
+    total_points: totalPoints,
     totalPoints: totalPoints,
     weeklyRequestsCount: weeklyRequests ? weeklyRequests.count : 0,
     weeklyRequestsLimit: 20
@@ -839,63 +1171,35 @@ app.get('/api/stats/student/:studentId', async (req, res) => {
 
 // إحصائيات أسرة
 app.get('/api/stats/group/:groupId', async (req, res) => {
-  // جلب مجموع نقاط الطلبات المقبولة لأعضاء الأسرة
-  const membersRequestsSum = await queryOne(`
-    SELECT COALESCE(SUM(r.points), 0) as total
-    FROM requests r
-    JOIN users u ON r.student_id = u.id
-    WHERE u.group_id = ${req.params.groupId} AND r.status = 'approved'
-  `);
+  const gid = req.params.groupId;
+  const membersRequestsSum = await queryOne(
+    `SELECT COALESCE(SUM(r.points), 0) as total FROM requests r
+     JOIN users u ON r.student_id = u.id
+     WHERE u.group_id = ? AND r.status = 'approved'`,
+    [gid]
+  );
+  const membersAdjustmentsSum = await queryOne(
+    `SELECT COALESCE(SUM(pa.points), 0) as total FROM points_adjustments pa
+     JOIN users u ON pa.student_id = u.id
+     WHERE u.group_id = ?`,
+    [gid]
+  );
+  const directAdjustmentsSum = await queryOne(
+    'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
+    [gid]
+  );
+  const membersPoints = Number(membersRequestsSum?.total ?? 0) + Number(membersAdjustmentsSum?.total ?? 0);
+  const directPoints = Number(directAdjustmentsSum?.total ?? 0);
+  const totalPoints = membersPoints + directPoints;
 
-  // جلب مجموع التعديلات اليدوية للأفراد
-  const membersAdjustmentsSum = await queryOne(`
-    SELECT COALESCE(SUM(pa.points), 0) as total
-    FROM points_adjustments pa
-    JOIN users u ON pa.student_id = u.id
-    WHERE u.group_id = ${req.params.groupId}
-  `);
-
-  // جلب مجموع نقاط الأسرة المباشرة
-  const directAdjustmentsSum = await queryOne(`
-    SELECT COALESCE(SUM(points), 0) as total
-    FROM group_points_adjustments
-    WHERE group_id = ${req.params.groupId}
-  `);
-
-  const membersRequestsTotal = membersRequestsSum?.total || 0;
-  const membersAdjTotal = membersAdjustmentsSum?.total || 0;
-  const directTotal = directAdjustmentsSum?.total || 0;
-
-  // مجموع نقاط الأفراد (طلبات + تعديلات)
-  const membersPointsTotal = membersRequestsTotal + membersAdjTotal;
-
-  // المجموع الكلي للأسرة
-  const grandTotal = membersPointsTotal + directTotal;
-
-  // توزيع المجموع الكلي على الخزانات
-  const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-
-  if (grandTotal > 0) {
-    let remaining = grandTotal;
-    while (remaining > 0) {
-      if (remaining >= 5) { fuel.ethanol++; remaining -= 5; }
-      else if (remaining >= 4) { fuel.fuel98++; remaining -= 4; }
-      else if (remaining >= 3) { fuel.fuel95++; remaining -= 3; }
-      else if (remaining >= 2) { fuel.fuel91++; remaining -= 2; }
-      else { fuel.diesel++; remaining -= 1; }
-    }
-  }
-  // إذا كان سالب أو صفر، الخزانات تبقى فارغة
-
-  // حساب النقاط الكلية (كل خزان × قيمته)
-  const totalPoints = (fuel.diesel * 1) + (fuel.fuel91 * 2) + (fuel.fuel95 * 3) + (fuel.fuel98 * 4) + (fuel.ethanol * 5);
-
+  const fuel = pointsToFuelTanks(totalPoints);
   res.json({
     fuel,
     totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol,
-    totalPoints: grandTotal,
-    membersPoints: membersPointsTotal,
-    directPoints: directTotal
+    total_points: totalPoints,
+    totalPoints: totalPoints,
+    membersPoints: membersPoints,
+    directPoints: directPoints
   });
 });
 
@@ -920,89 +1224,28 @@ app.get('/api/stats/overview', async (req, res) => {
 
 // ==================== Notifications Routes ====================
 
-// جلب إشعارات مستخدم
+// جلب إشعارات مستخدم (آخر 100)
 app.get('/api/notifications/:userId', async (req, res) => {
-  const notifications = await queryAll(`
-    SELECT * FROM notifications WHERE user_id = ${req.params.userId} ORDER BY created_at DESC
-  `);
+  const notifications = await queryAll(
+    'SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100',
+    [req.params.userId]
+  );
   res.json(notifications);
 });
 
 // تحديد الإشعارات كمقروءة
 app.post('/api/notifications/:userId/read', async (req, res) => {
-  await run(`UPDATE notifications SET is_read = 1 WHERE user_id = ${req.params.userId}`);
+  await run('UPDATE notifications SET is_read = 1 WHERE user_id = ?', [req.params.userId]);
   res.json({ success: true });
 });
 
 // عدد الإشعارات غير المقروءة
 app.get('/api/notifications/:userId/unread-count', async (req, res) => {
-  const count = await queryOne(`
-    SELECT COUNT(*) as count FROM notifications WHERE user_id = ${req.params.userId} AND is_read = 0
-  `);
+  const count = await queryOne(
+    'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0',
+    [req.params.userId]
+  );
   res.json({ count: count ? count.count : 0 });
-});
-
-// ==================== Settings Routes ====================
-
-// جلب كل الإعدادات
-app.get('/api/settings', async (req, res) => {
-  try {
-    const settings = await queryAll('SELECT * FROM settings');
-    const settingsObj = {};
-    settings.forEach(s => {
-      settingsObj[s.key] = s.value;
-    });
-
-    // إعدادات افتراضية إذا لم تكن موجودة
-    const defaults = {
-      auto_sync_to_group: 'true',
-      sync_approved_requests: 'true',
-      sync_manual_adjustments: 'true',
-      hide_points_from_all: 'false'
-    };
-
-    res.json({ ...defaults, ...settingsObj });
-  } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-// تحديث إعداد
-app.post('/api/settings', async (req, res) => {
-  const { key, value } = req.body;
-
-  try {
-    // تحقق إذا الإعداد موجود
-    const existing = await queryOne(`SELECT id FROM settings WHERE key = '${key}'`);
-
-    if (existing) {
-      await run(`UPDATE settings SET value = '${value}', updated_at = datetime('now') WHERE key = '${key}'`);
-    } else {
-      await run(`INSERT INTO settings (key, value) VALUES ('${key}', '${value}')`);
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-// ==================== Points Log Routes ====================
-
-// جلب سجل العمليات
-app.get('/api/points-log', async (req, res) => {
-  try {
-    const logs = await queryAll(`
-      SELECT pl.*, u.name as performer_name
-      FROM points_log pl
-      LEFT JOIN users u ON pl.performed_by = u.id
-      ORDER BY pl.created_at DESC
-      LIMIT 100
-    `);
-    res.json(logs);
-  } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
-  }
 });
 
 // فحص جداول التعديلات (للتصحيح)
@@ -1033,27 +1276,22 @@ app.get('/api/reports/weekly', async (req, res) => {
   const { week } = req.query;
   const weekNumber = week || getWeekNumber();
 
-  const report = await queryAll(`
-    SELECT
-      u.name as student_name,
-      g.name as group_name,
-      r.committee,
-      r.points,
-      r.status,
-      r.created_at
-    FROM requests r
-    JOIN users u ON r.student_id = u.id
-    LEFT JOIN groups g ON u.group_id = g.id
-    WHERE r.week_number = ${weekNumber}
-    ORDER BY r.created_at DESC
-  `);
+  const report = await queryAll(
+    `SELECT u.name as student_name, g.name as group_name, r.committee, r.points, r.status, r.created_at
+     FROM requests r
+     JOIN users u ON r.student_id = u.id
+     LEFT JOIN groups g ON u.group_id = g.id
+     WHERE r.week_number = ?
+     ORDER BY r.created_at DESC`,
+    [weekNumber]
+  );
 
   res.json({ weekNumber, data: report });
 });
 
 // ==================== PDF Export ====================
 
-// دالة رسم خزان الوقود في PDF
+// دالة رسم خزان الوقود في PDF (أسماء عربية + لترات)
 function drawFuelTank(doc, x, y, liters, name, color) {
   const tankWidth = 60;
   const tankHeight = 120;
@@ -1080,14 +1318,15 @@ function drawFuelTank(doc, x, y, liters, name, color) {
      .text(currentFill.toString(), x, y + tankHeight/2 - 8, { width: tankWidth, align: 'center' });
 
   // اسم الوقود
+  try { doc.font('Arabic'); } catch (e) { /* إذا لم يُسجل الخط */ }
   doc.fillColor(color)
      .fontSize(12)
-     .text(name, x, y + tankHeight + 10, { width: tankWidth, align: 'center' });
+     .text(name, x, y + tankHeight + 10, { width: tankWidth, align: 'center', features: ['rtla'] });
 
   // عدد اللترات الإجمالي
   doc.fillColor('#666666')
      .fontSize(10)
-     .text(`${liters} L`, x, y + tankHeight + 25, { width: tankWidth, align: 'center' });
+     .text(`${liters} لتر`, x, y + tankHeight + 25, { width: tankWidth, align: 'center', features: ['rtla'] });
 
   // النجوم
   if (stars > 0) {
@@ -1100,22 +1339,44 @@ function drawFuelTank(doc, x, y, liters, name, color) {
   doc.fillColor('#000000'); // إعادة اللون الافتراضي
 }
 
+// هيدر عربي موحّد لكل التقارير
+function setupArabicHeader(doc, title) {
+  if (fs.existsSync(ARABIC_FONT_PATH)) {
+    try { doc.font('Arabic'); } catch (e) { /* تجاهل */ }
+  }
+  doc.fontSize(28)
+     .fillColor('#09637E')
+     .text('طاقات السلطان', { align: 'center', features: ['rtla'] });
+
+  doc.moveDown(0.3);
+  doc.fontSize(14)
+     .fillColor('#0f172a')
+     .text('النظام التحفيزي للطلاب', { align: 'center', features: ['rtla'] });
+
+  doc.moveDown(1.0);
+  doc.fontSize(18)
+     .fillColor('#1e293b')
+     .text(title, { align: 'center', features: ['rtla'] });
+
+  doc.moveDown(1.2);
+}
+
 // تصدير PDF لطالب معين
 app.get('/api/export/student/:studentId', async (req, res) => {
-  const student = await queryOne(`
-    SELECT u.*, g.name as group_name FROM users u
-    LEFT JOIN groups g ON u.group_id = g.id
-    WHERE u.id = ${req.params.studentId}
-  `);
+  const student = await queryOne(
+    'SELECT u.*, g.name as group_name FROM users u LEFT JOIN groups g ON u.group_id = g.id WHERE u.id = ?',
+    [req.params.studentId]
+  );
 
   if (!student) {
     return res.status(404).json({ success: false, message: 'الطالب غير موجود' });
   }
 
   const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-  const approvedRequests = await queryAll(`
-    SELECT points FROM requests WHERE student_id = ${req.params.studentId} AND status = 'approved'
-  `);
+  const approvedRequests = await queryAll(
+    "SELECT points FROM requests WHERE student_id = ? AND status = 'approved'",
+    [req.params.studentId]
+  );
 
   approvedRequests.forEach(r => {
     switch(r.points) {
@@ -1130,7 +1391,13 @@ app.get('/api/export/student/:studentId', async (req, res) => {
   const doc = new PDFDocument({ size: 'A4', margin: 50 });
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=student_${student.id}_report.pdf`);
+  // افتراضياً: عرض داخل المتصفح. لإجبار التحميل: ?download=1
+  const studentFilename = `student_${student.id}_report.pdf`;
+  const studentDisposition = (req.query.download === '1' || req.query.download === 'true')
+    ? `attachment; filename=${studentFilename}`
+    : `inline; filename=${studentFilename}`;
+  res.setHeader('Content-Disposition', studentDisposition);
+  res.setHeader('Cache-Control', 'no-store');
 
   doc.pipe(res);
 
@@ -1140,60 +1407,94 @@ app.get('/api/export/student/:studentId', async (req, res) => {
   }
 
   // العنوان
-  doc.fontSize(28).fillColor('#09637E').text('Sultan Fuel System', { align: 'center' });
-  doc.moveDown(0.5);
-  doc.font('Arabic').fontSize(16).fillColor('#666666').text('تقرير الطالب', { align: 'center', features: ['rtla'] });
-  doc.moveDown(2);
+  setupArabicHeader(doc, 'تقرير الطالب');
 
-  // معلومات الطالب (بالعربي)
-  doc.font('Arabic').fontSize(18).fillColor('#333333');
-  doc.text(student.name, { align: 'center', features: ['rtla'] });
-  if (student.group_name) {
-    doc.font('Arabic').fontSize(14).fillColor('#666666').text(`أسرة: ${student.group_name}`, { align: 'center', features: ['rtla'] });
+  // بطاقة ملخص الطالب
+  if (fs.existsSync(ARABIC_FONT_PATH)) {
+    doc.font('Arabic');
   }
-  doc.moveDown(2);
+  const pageWidth = doc.page.width;
+  const cardMarginX = 50;
+  const cardWidth = pageWidth - cardMarginX * 2;
+  const cardStartY = doc.y;
+  const cardHeight = 70;
+
+  doc.roundedRect(cardMarginX, cardStartY, cardWidth, cardHeight, 10)
+     .lineWidth(1)
+     .stroke('#e2e8f0');
+
+  doc.fontSize(18).fillColor('#0f172a')
+     .text(student.name, cardMarginX + 12, cardStartY + 10, {
+       width: cardWidth - 24,
+       align: 'right',
+       features: ['rtla']
+     });
+
+  let summaryLine = '';
+  if (student.group_name) {
+    summaryLine = `أسرة: ${student.group_name}`;
+  }
+  const totalLiters = fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol;
+  if (summaryLine) {
+    summaryLine += `   •   إجمالي اللترات: ${totalLiters} لتر`;
+  } else {
+    summaryLine = `إجمالي اللترات: ${totalLiters} لتر`;
+  }
+
+  doc.fontSize(12).fillColor('#64748b')
+     .text(summaryLine, cardMarginX + 12, cardStartY + 40, {
+       width: cardWidth - 24,
+       align: 'right',
+       features: ['rtla']
+     });
+
+  // تحريك المؤشر أسفل البطاقة
+  doc.y = cardStartY + cardHeight + 25;
 
   // رسم الخزانات
   const startX = 80;
-  const tankY = 220;
+  const tankY = doc.y;
   const tankSpacing = 90;
 
-  drawFuelTank(doc, startX, tankY, fuel.diesel, 'Diesel', '#8B7355');
-  drawFuelTank(doc, startX + tankSpacing, tankY, fuel.fuel91, '91', '#22c55e');
-  drawFuelTank(doc, startX + tankSpacing * 2, tankY, fuel.fuel95, '95', '#ef4444');
-  drawFuelTank(doc, startX + tankSpacing * 3, tankY, fuel.fuel98, '98', '#888888');
-  drawFuelTank(doc, startX + tankSpacing * 4, tankY, fuel.ethanol, 'Ethanol', '#3b82f6');
+  drawFuelTank(doc, startX, tankY, fuel.diesel, 'ديزل', '#8B7355');
+  drawFuelTank(doc, startX + tankSpacing, tankY, fuel.fuel91, '٩١', '#22c55e');
+  drawFuelTank(doc, startX + tankSpacing * 2, tankY, fuel.fuel95, '٩٥', '#ef4444');
+  drawFuelTank(doc, startX + tankSpacing * 3, tankY, fuel.fuel98, '٩٨', '#888888');
+  drawFuelTank(doc, startX + tankSpacing * 4, tankY, fuel.ethanol, 'إيثانول', '#3b82f6');
 
   // المجموع
-  const total = fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol;
-  doc.moveDown(12);
-  doc.fontSize(18).fillColor('#09637E').text(`Total: ${total} Liters`, { align: 'center' });
+  const total = totalLiters;
+  doc.moveDown(9);
+  doc.font('Arabic').fontSize(16).fillColor('#09637E').text(`المجموع: ${total} لتر`, { align: 'center', features: ['rtla'] });
 
   // التاريخ
   doc.moveDown(2);
-  doc.fontSize(10).fillColor('#999999').text(`Generated: ${new Date().toLocaleDateString()}`, { align: 'center' });
+  const dateStr = new Date().toLocaleDateString('ar-SA');
+  doc.font('Arabic').fontSize(10).fillColor('#999999').text(`تاريخ الإصدار: ${dateStr}`, { align: 'center', features: ['rtla'] });
 
   doc.end();
 });
 
 // تصدير PDF لأسرة معينة
 app.get('/api/export/group/:groupId', async (req, res) => {
-  const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.groupId}`);
+  const group = await queryOne('SELECT * FROM groups WHERE id = ?', [req.params.groupId]);
 
   if (!group) {
     return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
   }
 
-  const students = await queryAll(`
-    SELECT u.id, u.name FROM users u WHERE u.group_id = ${req.params.groupId} AND u.role = 'student'
-  `);
+  const students = await queryAll(
+    "SELECT u.id, u.name FROM users u WHERE u.group_id = ? AND u.role = 'student'",
+    [req.params.groupId]
+  );
 
   const studentsWithFuel = [];
   for (const student of students) {
     const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-    const approvedRequests = await queryAll(`
-      SELECT points FROM requests WHERE student_id = ${student.id} AND status = 'approved'
-    `);
+    const approvedRequests = await queryAll(
+      "SELECT points FROM requests WHERE student_id = ? AND status = 'approved'",
+      [student.id]
+    );
 
     approvedRequests.forEach(r => {
       switch(r.points) {
@@ -1211,7 +1512,13 @@ app.get('/api/export/group/:groupId', async (req, res) => {
   const doc = new PDFDocument({ size: 'A4', margin: 40 });
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=group_${group.id}_report.pdf`);
+  // افتراضياً: عرض داخل المتصفح. لإجبار التحميل: ?download=1
+  const groupFilename = `group_${group.id}_report.pdf`;
+  const groupDisposition = (req.query.download === '1' || req.query.download === 'true')
+    ? `attachment; filename=${groupFilename}`
+    : `inline; filename=${groupFilename}`;
+  res.setHeader('Content-Disposition', groupDisposition);
+  res.setHeader('Cache-Control', 'no-store');
 
   doc.pipe(res);
 
@@ -1221,76 +1528,115 @@ app.get('/api/export/group/:groupId', async (req, res) => {
   }
 
   // العنوان
-  doc.fontSize(28).fillColor('#09637E').text('Sultan Fuel System', { align: 'center' });
-  doc.moveDown(0.5);
-  doc.font('Arabic').fontSize(16).fillColor('#666666').text(`تقرير أسرة: ${group.name}`, { align: 'center', features: ['rtla'] });
-  doc.moveDown(2);
+  setupArabicHeader(doc, `تقرير أسرة: ${group.name}`);
 
-  // رسم خزانات كل طالب
-  let currentY = 150;
-  const pageHeight = 750;
+  if (fs.existsSync(ARABIC_FONT_PATH)) {
+    doc.font('Arabic');
+  }
 
-  studentsWithFuel.forEach((student, index) => {
-    // صفحة جديدة إذا لزم الأمر
-    if (currentY > pageHeight - 200) {
-      doc.addPage();
-      currentY = 50;
-    }
+  // حساب ملخص الأسرة (لترات إجمالية)
+  const groupFuelTotals = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+  studentsWithFuel.forEach(s => {
+    groupFuelTotals.diesel += s.fuel.diesel;
+    groupFuelTotals.fuel91 += s.fuel.fuel91;
+    groupFuelTotals.fuel95 += s.fuel.fuel95;
+    groupFuelTotals.fuel98 += s.fuel.fuel98;
+    groupFuelTotals.ethanol += s.fuel.ethanol;
+  });
+  const totalLitersGroup =
+    groupFuelTotals.diesel +
+    groupFuelTotals.fuel91 +
+    groupFuelTotals.fuel95 +
+    groupFuelTotals.fuel98 +
+    groupFuelTotals.ethanol;
 
-    // اسم الطالب (بالعربي)
-    doc.font('Arabic').fontSize(14).fillColor('#333333').text(student.name, 450, currentY, { align: 'right', width: 400 });
-    currentY += 25;
+  // بطاقة ملخص الأسرة
+  const pageWidthG = doc.page.width;
+  const cardMarginXG = 45;
+  const cardWidthG = pageWidthG - cardMarginXG * 2;
+  const cardStartYG = doc.y;
+  const cardHeightG = 80;
 
-    // رسم الخزانات المصغرة
-    const startX = 50;
-    const tankSpacing = 70;
-    const smallTankHeight = 80;
+  doc.roundedRect(cardMarginXG, cardStartYG, cardWidthG, cardHeightG, 10)
+     .lineWidth(1)
+     .stroke('#e2e8f0');
 
-    // رسم خزانات صغيرة
-    const fuels = [
-      { liters: student.fuel.diesel, name: 'Diesel', color: '#8B7355' },
-      { liters: student.fuel.fuel91, name: '91', color: '#22c55e' },
-      { liters: student.fuel.fuel95, name: '95', color: '#ef4444' },
-      { liters: student.fuel.fuel98, name: '98', color: '#888888' },
-      { liters: student.fuel.ethanol, name: 'Ethanol', color: '#3b82f6' }
-    ];
+  doc.fontSize(16).fillColor('#0f172a')
+     .text(group.name, cardMarginXG + 12, cardStartYG + 10, {
+       width: cardWidthG - 24,
+       align: 'right',
+       features: ['rtla']
+     });
 
-    fuels.forEach((f, i) => {
-      const x = startX + i * tankSpacing;
-      const cycleSize = 20;
-      const fillPercent = (f.liters % cycleSize) / cycleSize;
-      const fillHeight = smallTankHeight * fillPercent;
-      const stars = Math.floor(f.liters / cycleSize);
-
-      // إطار الخزان
-      doc.rect(x, currentY, 50, smallTankHeight).lineWidth(1).stroke('#cccccc');
-
-      // مستوى الوقود
-      if (fillHeight > 0) {
-        doc.rect(x + 1, currentY + smallTankHeight - fillHeight + 1, 48, fillHeight - 2).fill(f.color);
-      }
-
-      // الرقم
-      doc.fillColor('#333').fontSize(12).text((f.liters % cycleSize).toString(), x, currentY + smallTankHeight/2 - 6, { width: 50, align: 'center' });
-
-      // اسم الوقود واللترات
-      doc.fillColor('#666').fontSize(8).text(`${f.name}`, x, currentY + smallTankHeight + 5, { width: 50, align: 'center' });
-      doc.text(`${f.liters}L`, x, currentY + smallTankHeight + 15, { width: 50, align: 'center' });
-
-      // النجوم
-      if (stars > 0) {
-        doc.fillColor('#f59e0b').fontSize(8).text(stars <= 3 ? '★'.repeat(stars) : `★x${stars}`, x, currentY + smallTankHeight + 25, { width: 50, align: 'center' });
-      }
-    });
-
-    // المجموع
-    doc.fillColor('#09637E').fontSize(12).text(`Total: ${student.total}L`, 400, currentY + smallTankHeight/2);
-
-    currentY += smallTankHeight + 60;
+  doc.fontSize(12).fillColor('#64748b')
+     .text(`عدد الطلاب: ${students.length}`, cardMarginXG + 12, cardStartYG + 36, {
+       width: cardWidthG - 24,
+       align: 'right',
+       features: ['rtla']
+     });
+  doc.text(`إجمالي اللترات: ${totalLitersGroup} لتر`, cardMarginXG + 12, cardStartYG + 54, {
+    width: cardWidthG - 24,
+    align: 'right',
+    features: ['rtla']
   });
 
-  // التاريخ
-  doc.fontSize(10).fillColor('#999999').text(`Generated: ${new Date().toLocaleDateString()}`, 50, doc.page.height - 50);
+  doc.y = cardStartYG + cardHeightG + 25;
+
+  // خزانات الأسرة المجمّعة
+  const groupStartX = 70;
+  const groupTankY = doc.y;
+  const groupTankSpacing = 80;
+
+  drawFuelTank(doc, groupStartX, groupTankY, groupFuelTotals.diesel, 'ديزل', '#8B7355');
+  drawFuelTank(doc, groupStartX + groupTankSpacing, groupTankY, groupFuelTotals.fuel91, '٩١', '#22c55e');
+  drawFuelTank(doc, groupStartX + groupTankSpacing * 2, groupTankY, groupFuelTotals.fuel95, '٩٥', '#ef4444');
+  drawFuelTank(doc, groupStartX + groupTankSpacing * 3, groupTankY, groupFuelTotals.fuel98, '٩٨', '#888888');
+  drawFuelTank(doc, groupStartX + groupTankSpacing * 4, groupTankY, groupFuelTotals.ethanol, 'إيثانول', '#3b82f6');
+
+  // الانتقال أسفل الخزانات
+  doc.y = groupTankY + 170;
+  doc.moveDown(0.5);
+
+  // جدول الطلاب (رقم - اسم - لترات)
+  const tableTop = doc.y;
+  const pageHeight = doc.page.height - 60;
+  const rowHeight = 20;
+
+  function drawGroupTableHeader(y) {
+    doc.font('Arabic').fontSize(12).fillColor('#0f172a');
+    doc.text('#', 50, y, { width: 30, align: 'center' });
+    doc.text('اسم الطالب', 90, y, { width: 260, align: 'right', features: ['rtla'] });
+    doc.text('اللترات', 370, y, { width: 120, align: 'center' });
+    doc.moveTo(45, y + rowHeight - 4).lineTo(pageWidthG - 45, y + rowHeight - 4).stroke('#e2e8f0');
+  }
+
+  let currentY = tableTop;
+  drawGroupTableHeader(currentY);
+  currentY += rowHeight;
+
+  studentsWithFuel.forEach((s, index) => {
+    if (currentY > pageHeight) {
+      doc.addPage();
+      if (fs.existsSync(ARABIC_FONT_PATH)) {
+        doc.font('Arabic');
+      }
+      currentY = 50;
+      drawGroupTableHeader(currentY);
+      currentY += rowHeight;
+    }
+
+    doc.font('Arabic').fontSize(11).fillColor('#111827');
+    doc.text(String(index + 1), 50, currentY, { width: 30, align: 'center' });
+    doc.text(s.name, 90, currentY, { width: 260, align: 'right', features: ['rtla'] });
+    doc.text(`${s.total} لتر`, 370, currentY, { width: 120, align: 'center', features: ['rtla'] });
+
+    currentY += rowHeight;
+  });
+
+  // التاريخ أسفل آخر صفحة
+  const dateStrGroup = new Date().toLocaleDateString('ar-SA');
+  doc.font('Arabic').fontSize(10).fillColor('#999999')
+     .text(`تاريخ الإصدار: ${dateStrGroup}`, 50, doc.page.height - 50, { features: ['rtla'] });
 
   doc.end();
 });
@@ -1306,9 +1652,10 @@ app.get('/api/export/all', async (req, res) => {
   const studentsWithFuel = [];
   for (const student of students) {
     const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-    const approvedRequests = await queryAll(`
-      SELECT points FROM requests WHERE student_id = ${student.id} AND status = 'approved'
-    `);
+    const approvedRequests = await queryAll(
+      "SELECT points FROM requests WHERE student_id = ? AND status = 'approved'",
+      [student.id]
+    );
 
     approvedRequests.forEach(r => {
       switch(r.points) {
@@ -1326,7 +1673,13 @@ app.get('/api/export/all', async (req, res) => {
   const doc = new PDFDocument({ size: 'A4', margin: 40 });
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'attachment; filename=all_students_report.pdf');
+  // افتراضياً: عرض داخل المتصفح. لإجبار التحميل: ?download=1
+  const allFilename = 'all_students_report.pdf';
+  const allDisposition = (req.query.download === '1' || req.query.download === 'true')
+    ? `attachment; filename=${allFilename}`
+    : `inline; filename=${allFilename}`;
+  res.setHeader('Content-Disposition', allDisposition);
+  res.setHeader('Cache-Control', 'no-store');
 
   doc.pipe(res);
 
@@ -1335,81 +1688,137 @@ app.get('/api/export/all', async (req, res) => {
     doc.registerFont('Arabic', ARABIC_FONT_PATH);
   }
 
+  // حساب الإحصائيات العامة
+  const totalStudents = studentsWithFuel.length;
+  const uniqueGroups = new Set(studentsWithFuel.map(s => s.group_name).filter(Boolean));
+  const totalFuelTotals = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+  studentsWithFuel.forEach(s => {
+    totalFuelTotals.diesel += s.fuel.diesel;
+    totalFuelTotals.fuel91 += s.fuel.fuel91;
+    totalFuelTotals.fuel95 += s.fuel.fuel95;
+    totalFuelTotals.fuel98 += s.fuel.fuel98;
+    totalFuelTotals.ethanol += s.fuel.ethanol;
+  });
+  const totalLitersAll =
+    totalFuelTotals.diesel +
+    totalFuelTotals.fuel91 +
+    totalFuelTotals.fuel95 +
+    totalFuelTotals.fuel98 +
+    totalFuelTotals.ethanol;
+
   // العنوان
-  doc.fontSize(28).fillColor('#09637E').text('Sultan Fuel System', { align: 'center' });
-  doc.moveDown(0.5);
-  doc.font('Arabic').fontSize(16).fillColor('#666666').text('تقرير جميع الطلاب', { align: 'center', features: ['rtla'] });
-  doc.moveDown(2);
+  setupArabicHeader(doc, 'تقرير جميع الطلاب');
 
-  // رسم خزانات كل طالب
-  let currentY = 150;
-  const pageHeight = 750;
+  if (fs.existsSync(ARABIC_FONT_PATH)) {
+    doc.font('Arabic');
+  }
 
-  studentsWithFuel.forEach((student, index) => {
-    // صفحة جديدة إذا لزم الأمر
-    if (currentY > pageHeight - 200) {
-      doc.addPage();
-      currentY = 50;
-    }
+  const pageWidthAll = doc.page.width;
 
-    // اسم الطالب والأسرة (بالعربي)
-    doc.font('Arabic').fontSize(14).fillColor('#333333').text(student.name, 450, currentY, { align: 'right', width: 400 });
-    if (student.group_name) {
-      doc.font('Arabic').fontSize(10).fillColor('#888888').text(`(${student.group_name})`, 450, currentY + 18, { align: 'right', width: 400 });
-    }
-    currentY += 35;
+  // بطاقة إحصائيات عامة
+  const cardX = 45;
+  const cardWidth = pageWidthAll - 90;
+  const cardY = doc.y;
+  const cardHeight = 80;
+  doc.roundedRect(cardX, cardY, cardWidth, cardHeight, 10)
+     .lineWidth(1)
+     .stroke('#e2e8f0');
 
-    // رسم الخزانات المصغرة
-    const startX = 50;
-    const tankSpacing = 70;
-    const smallTankHeight = 80;
-
-    const fuels = [
-      { liters: student.fuel.diesel, name: 'Diesel', color: '#8B7355' },
-      { liters: student.fuel.fuel91, name: '91', color: '#22c55e' },
-      { liters: student.fuel.fuel95, name: '95', color: '#ef4444' },
-      { liters: student.fuel.fuel98, name: '98', color: '#888888' },
-      { liters: student.fuel.ethanol, name: 'Ethanol', color: '#3b82f6' }
-    ];
-
-    fuels.forEach((f, i) => {
-      const x = startX + i * tankSpacing;
-      const cycleSize = 20;
-      const fillPercent = (f.liters % cycleSize) / cycleSize;
-      const fillHeight = smallTankHeight * fillPercent;
-      const stars = Math.floor(f.liters / cycleSize);
-
-      // إطار الخزان
-      doc.rect(x, currentY, 50, smallTankHeight).lineWidth(1).stroke('#cccccc');
-
-      // مستوى الوقود
-      if (fillHeight > 0) {
-        doc.rect(x + 1, currentY + smallTankHeight - fillHeight + 1, 48, fillHeight - 2).fill(f.color);
-      }
-
-      // الرقم
-      doc.fillColor('#333').fontSize(12).text((f.liters % cycleSize).toString(), x, currentY + smallTankHeight/2 - 6, { width: 50, align: 'center' });
-
-      // اسم الوقود واللترات
-      doc.fillColor('#666').fontSize(8).text(`${f.name}`, x, currentY + smallTankHeight + 5, { width: 50, align: 'center' });
-      doc.text(`${f.liters}L`, x, currentY + smallTankHeight + 15, { width: 50, align: 'center' });
-
-      // النجوم
-      if (stars > 0) {
-        doc.fillColor('#f59e0b').fontSize(8).text(stars <= 3 ? '★'.repeat(stars) : `★x${stars}`, x, currentY + smallTankHeight + 25, { width: 50, align: 'center' });
-      }
-    });
-
-    // المجموع
-    doc.fillColor('#09637E').fontSize(12).text(`Total: ${student.total}L`, 400, currentY + smallTankHeight/2);
-
-    currentY += smallTankHeight + 60;
+  doc.fontSize(14).fillColor('#0f172a')
+     .text(`عدد الطلاب: ${totalStudents}`, cardX + 12, cardY + 10, {
+       width: cardWidth - 24,
+       align: 'right',
+       features: ['rtla']
+     });
+  doc.fontSize(12).fillColor('#64748b')
+     .text(`عدد الأسر: ${uniqueGroups.size}`, cardX + 12, cardY + 32, {
+       width: cardWidth - 24,
+       align: 'right',
+       features: ['rtla']
+     });
+  doc.text(`إجمالي اللترات: ${totalLitersAll} لتر`, cardX + 12, cardY + 50, {
+    width: cardWidth - 24,
+    align: 'right',
+    features: ['rtla']
   });
 
-  // التاريخ
-  doc.fontSize(10).fillColor('#999999').text(`Generated: ${new Date().toLocaleDateString()}`, 50, doc.page.height - 50);
+  doc.y = cardY + cardHeight + 25;
+
+  // خزانات عامة للنظام
+  const tanksX = 70;
+  const tanksY = doc.y;
+  const tanksSpacing = 80;
+  drawFuelTank(doc, tanksX, tanksY, totalFuelTotals.diesel, 'ديزل', '#8B7355');
+  drawFuelTank(doc, tanksX + tanksSpacing, tanksY, totalFuelTotals.fuel91, '٩١', '#22c55e');
+  drawFuelTank(doc, tanksX + tanksSpacing * 2, tanksY, totalFuelTotals.fuel95, '٩٥', '#ef4444');
+  drawFuelTank(doc, tanksX + tanksSpacing * 3, tanksY, totalFuelTotals.fuel98, '٩٨', '#888888');
+  drawFuelTank(doc, tanksX + tanksSpacing * 4, tanksY, totalFuelTotals.ethanol, 'إيثانول', '#3b82f6');
+
+  // الانتقال أسفل الخزانات للجداول
+  doc.y = tanksY + 170;
+  doc.moveDown(0.5);
+
+  // جدول الطلاب (يتوزع على عدّة صفحات)
+  const tableTopAll = doc.y;
+  const pageHeightAll = doc.page.height - 60;
+  const rowHeightAll = 20;
+
+  function drawAllTableHeader(y) {
+    doc.font('Arabic').fontSize(12).fillColor('#0f172a');
+    doc.text('#', 40, y, { width: 25, align: 'center' });
+    doc.text('اسم الطالب', 75, y, { width: 200, align: 'right', features: ['rtla'] });
+    doc.text('الأسرة', 285, y, { width: 140, align: 'right', features: ['rtla'] });
+    doc.text('اللترات', 435, y, { width: 100, align: 'center', features: ['rtla'] });
+    doc.moveTo(35, y + rowHeightAll - 4).lineTo(pageWidthAll - 35, y + rowHeightAll - 4).stroke('#e2e8f0');
+  }
+
+  let currentYAll = tableTopAll;
+  drawAllTableHeader(currentYAll);
+  currentYAll += rowHeightAll;
+
+  studentsWithFuel.forEach((s, index) => {
+    if (currentYAll > pageHeightAll) {
+      doc.addPage();
+      if (fs.existsSync(ARABIC_FONT_PATH)) {
+        doc.font('Arabic');
+      }
+      currentYAll = 50;
+      drawAllTableHeader(currentYAll);
+      currentYAll += rowHeightAll;
+    }
+
+    doc.font('Arabic').fontSize(11).fillColor('#111827');
+    doc.text(String(index + 1), 40, currentYAll, { width: 25, align: 'center' });
+    doc.text(s.name, 75, currentYAll, { width: 200, align: 'right', features: ['rtla'] });
+    doc.text(s.group_name || 'بدون أسرة', 285, currentYAll, { width: 140, align: 'right', features: ['rtla'] });
+    doc.text(`${s.total} لتر`, 435, currentYAll, { width: 100, align: 'center', features: ['rtla'] });
+
+    currentYAll += rowHeightAll;
+  });
+
+  // التاريخ أسفل آخر صفحة
+  const allDateStr = new Date().toLocaleDateString('ar-SA');
+  doc.font('Arabic').fontSize(10).fillColor('#999999')
+     .text(`تاريخ الإصدار: ${allDateStr}`, 50, doc.page.height - 50, { features: ['rtla'] });
 
   doc.end();
+});
+
+// ==================== أي طلب لم يُطابق أي route (404 للـ API كـ JSON) ====================
+
+app.all('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ success: false, message: 'مسار API غير موجود' });
+  }
+  next();
+});
+
+// معالج أخطاء عام (دائماً JSON)
+app.use((err, req, res, next) => {
+  console.error('Server Error:', err);
+  if (!res.headersSent) {
+    res.status(500).json({ success: false, message: err.message || 'خطأ في الخادم' });
+  }
 });
 
 // ==================== Serve Frontend ====================
@@ -1418,12 +1827,39 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/index.html'));
 });
 
+// الحصول على عنوان IP المحلي للشبكة (لفتح الموقع من الجوال)
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
 // تشغيل السيرفر
 const startServer = async () => {
   await initDatabase();
 
-  app.listen(PORT, () => {
+  // تحذيرات تشغيل (Render / Production)
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    if (!(process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN)) {
+      console.warn('⚠️ تحذير: متغيرات TURSO غير مضبوطة. سيتم استخدام SQLite داخل الحاوية وقد تفقد البيانات بعد إعادة النشر.');
+    }
+    if (!process.env.ONESIGNAL_APP_ID) {
+      console.warn('⚠️ تحذير: ONESIGNAL_APP_ID غير مضبوط. Push Notifications لن تعمل (لوحة الإشعارات داخل التطبيق ستبقى تعمل).');
+    }
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    const ip = getLocalIP();
     console.log(`🚀 السيرفر يعمل على http://localhost:${PORT}`);
+    if (ip !== 'localhost') {
+      console.log(`📱 للجوال على نفس الشبكة: http://${ip}:${PORT}`);
+    }
     console.log('📊 نظام طاقات السلطان جاهز!');
   });
 };

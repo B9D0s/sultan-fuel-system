@@ -1,5 +1,6 @@
 // ==================== API Configuration ====================
 const API_URL = window.location.origin + '/api';
+window.API_URL = API_URL; // للاستخدام في app.js (إضافة/خصم نقاط طالب، إخفاء النقاط)
 
 // ==================== Generic API Functions ====================
 async function apiCall(endpoint, options = {}) {
@@ -12,7 +13,17 @@ async function apiCall(endpoint, options = {}) {
       ...options
     });
 
-    const data = await response.json();
+    const contentType = response.headers.get('Content-Type') || '';
+    let data;
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      const text = await response.text();
+      console.error('API returned non-JSON:', text.substring(0, 200));
+      throw new Error(response.ok
+        ? 'استجابة غير متوقعة من الخادم'
+        : 'خطأ في الخادم - تأكد من تشغيل السيرفر وإعادة تحميل الصفحة');
+    }
 
     if (!response.ok) {
       throw new Error(data.message || 'حدث خطأ في الاتصال');
@@ -21,6 +32,9 @@ async function apiCall(endpoint, options = {}) {
     return data;
   } catch (error) {
     console.error('API Error:', error);
+    if (error.name === 'TypeError' && (error.message === 'Failed to fetch' || error.message.includes('fetch'))) {
+      throw new Error('تعذر الاتصال بالسيرفر. شغّل السيرفر من مجلد المشروع: npm start. إن ظهر "محظور" فجرّب تعطيل مانع الإعلانات لهذا الموقع.');
+    }
     throw error;
   }
 }
@@ -104,7 +118,14 @@ const StudentsAPI = {
 
 // ==================== Requests API ====================
 const RequestsAPI = {
-  getAll: (status = '') => apiCall(`/requests${status ? `?status=${status}` : ''}`),
+  getAll: (status = '', cursor = '', limit = 50) => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (cursor) params.set('cursor', cursor);
+    params.set('limit', limit);
+    const qs = params.toString();
+    return apiCall(`/requests${qs ? '?' + qs : ''}`);
+  },
 
   getByStudent: (studentId) => apiCall(`/requests/student/${studentId}`),
 
@@ -131,6 +152,16 @@ const StatsAPI = {
   getGroupStats: (groupId) => apiCall(`/stats/group/${groupId}`),
 
   getOverview: () => apiCall('/stats/overview')
+};
+
+// ==================== Settings API ====================
+const SettingsAPI = {
+  getAll: () => apiCall('/settings'),
+  set: (key, value) => apiCall('/settings', {
+    method: 'POST',
+    body: JSON.stringify({ key, value })
+  }),
+  getPointsLog: (limit = 200) => apiCall(`/points-log?limit=${encodeURIComponent(limit)}`)
 };
 
 // ==================== Notifications API ====================

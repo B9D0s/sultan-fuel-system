@@ -14,6 +14,12 @@ document.addEventListener('DOMContentLoaded', () => {
   initLoginTabs();
   initLoginForms();
   checkStoredSession();
+  // اظهر تلميح السحب للجداول عند الحاجة
+  try {
+    const mo = new MutationObserver(() => markScrollableTables(document));
+    mo.observe(document.body, { childList: true, subtree: true });
+    markScrollableTables(document);
+  } catch (e) { /* ignore */ }
 });
 
 // ==================== Login Tabs ====================
@@ -85,6 +91,63 @@ function showError(element, message) {
   setTimeout(() => {
     element.style.display = 'none';
   }, 3000);
+}
+
+// ==================== UX Helpers (Toasts / Busy / Tables) ====================
+function ensureToastContainer() {
+  let el = document.getElementById('toast-container');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast-container';
+    el.className = 'toast-container';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function showToast(type, message, ttlMs = 2600) {
+  const container = ensureToastContainer();
+  const toast = document.createElement('div');
+  toast.className = `toast ${type || 'info'}`;
+  toast.innerHTML = `
+    <div class="toast-msg">${String(message || '').replace(/</g, '&lt;')}</div>
+    <button class="toast-close" aria-label="إغلاق">✕</button>
+  `;
+  const closeBtn = toast.querySelector('.toast-close');
+  const remove = () => {
+    if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
+  };
+  closeBtn?.addEventListener('click', remove);
+  container.appendChild(toast);
+  setTimeout(remove, ttlMs);
+}
+
+function notifyUser(message, type = 'info') {
+  try {
+    // إذا كنا داخل لوحة التحكم، استخدم toast بدل alert
+    if (document.getElementById('dashboard')?.style?.display !== 'none') {
+      showToast(type, message);
+      return;
+    }
+  } catch (e) { /* ignore */ }
+  alert(message);
+}
+
+function setModalBusy(isBusy) {
+  const overlay = document.getElementById('modal-overlay');
+  if (!overlay?.classList?.contains('active')) return;
+  overlay.querySelectorAll('#modal-footer button').forEach(btn => { btn.disabled = !!isBusy; });
+  overlay.querySelectorAll('#modal-body input, #modal-body select, #modal-body textarea').forEach(el => { el.disabled = !!isBusy; });
+}
+
+function markScrollableTables(root = document) {
+  const containers = root.querySelectorAll ? root.querySelectorAll('.table-container') : [];
+  containers.forEach(c => {
+    try {
+      const isScrollable = c.scrollWidth > c.clientWidth + 2;
+      c.classList.toggle('is-scrollable', isScrollable);
+    } catch (e) { /* ignore */ }
+  });
 }
 
 // ==================== Session Management ====================
@@ -180,6 +243,9 @@ function buildSidebar() {
       <a class="nav-item" data-page="reports">
         <i class="fas fa-chart-bar"></i> التقارير
       </a>
+      <a class="nav-item" data-page="settings">
+        <i class="fas fa-cog"></i> الإعدادات
+      </a>
     `;
   } else {
     navItems = `
@@ -237,6 +303,10 @@ function buildMobileNav() {
         <i class="fas fa-clipboard-list"></i>
         <span>الطلبات</span>
       </button>
+      <button class="mobile-nav-item" data-page="settings">
+        <i class="fas fa-cog"></i>
+        <span>الإعدادات</span>
+      </button>
       <button class="mobile-nav-item" onclick="logout()">
         <i class="fas fa-sign-out-alt"></i>
         <span>خروج</span>
@@ -255,6 +325,10 @@ function buildMobileNav() {
       <button class="mobile-nav-item" data-page="requests">
         <i class="fas fa-clipboard-list"></i>
         <span>الطلبات</span>
+      </button>
+      <button class="mobile-nav-item" data-page="settings">
+        <i class="fas fa-cog"></i>
+        <span>الإعدادات</span>
       </button>
       <button class="mobile-nav-item" onclick="logout()">
         <i class="fas fa-sign-out-alt"></i>
@@ -336,6 +410,9 @@ function navigateTo(page) {
     case 'groups':
       renderGroupsPage();
       break;
+    case 'group-details':
+      renderGroupDetailsPage(currentGroupId);
+      break;
     case 'supervisors':
       renderSupervisorsPage();
       break;
@@ -348,20 +425,21 @@ function navigateTo(page) {
     case 'reports':
       renderReportsPage();
       break;
+    case 'settings':
+      renderSettingsPage();
+      break;
     case 'new-request':
       renderNewRequestPage();
       break;
     case 'my-requests':
       renderMyRequestsPage();
       break;
-    case 'settings':
-      renderSettingsPage();
-      break;
-    case 'group-details':
-      renderGroupDetailsPage(currentGroupId);
-      break;
     case 'my-group':
-      renderMyGroupPage();
+      if (currentUser.role === 'student') {
+        renderStudentGroupPage();
+      } else {
+        if (typeof renderMyGroupPage === 'function') renderMyGroupPage();
+      }
       break;
   }
 }
@@ -370,12 +448,25 @@ let currentGroupId = null;
 
 // ==================== Student Dashboard ====================
 async function renderStudentDashboard() {
+  mainContent.innerHTML = `<div class="loading-message"><i class="fas fa-spinner fa-spin"></i> جاري تحميل رصيدك...</div>`;
+
   try {
     const stats = await StatsAPI.getStudentStats(currentUser.id);
-    const settings = await SettingsAPI.getAll();
-    const hidePoints = settings.hide_points_from_all === 'true';
+    let globalHide = false;
+    try {
+      const settingsRes = await SettingsAPI.getAll();
+      const settings = settingsRes?.settings || {};
+      globalHide = settings.global_hide_points === '1' || settings.global_hide_points === 1 || settings.global_hide_points === true || String(settings.global_hide_points || '').toLowerCase() === 'true';
+    } catch (e) { /* ignore */ }
+    const limit = Math.max(1, stats?.weeklyRequestsLimit ?? 20);
+    const count = Math.max(0, stats?.weeklyRequestsCount ?? 0);
+    const totalLiters = stats?.totalLiters ?? 0;
+    const totalPoints = stats?.total_points ?? 0;
+    const fuel = stats?.fuel || { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+    const progressPercent = Math.min(100, Math.round((count / limit) * 100));
 
-    // جلب معلومات الأسرة إذا كان الطالب ينتمي لأسرة
+    const hidePoints = globalHide || currentUser.points_hidden === 1 || currentUser.points_hidden === true;
+
     let groupInfo = null;
     if (currentUser.group_id) {
       try {
@@ -399,11 +490,11 @@ async function renderStudentDashboard() {
       <div class="weekly-progress">
         <h3>الطلبات هذا الأسبوع</h3>
         <div class="progress-bar">
-          <div class="progress-fill" style="width: ${(stats.weeklyRequestsCount / stats.weeklyRequestsLimit) * 100}%"></div>
+          <div class="progress-fill" style="width: ${progressPercent}%"></div>
         </div>
         <div class="progress-text">
-          <span>${stats.weeklyRequestsCount} من ${stats.weeklyRequestsLimit}</span>
-          <span>متبقي: ${stats.weeklyRequestsLimit - stats.weeklyRequestsCount} طلب</span>
+          <span>${count} من ${limit}</span>
+          <span>متبقي: ${limit - count} طلب</span>
         </div>
       </div>
 
@@ -421,15 +512,15 @@ async function renderStudentDashboard() {
         <div class="card">
           <div class="card-header">
             <h2>خزانات الوقود الخاصة بي</h2>
-            <span>المجموع: ${stats.totalLiters} لتر (${stats.totalPoints || 0} نقطة)</span>
+            <span>المجموع: ${totalLiters} لتر • ${totalPoints} نقطة</span>
           </div>
           <div class="card-body">
             <div class="fuel-tanks-container">
-              ${renderFuelTank('ديزل', stats.fuel.diesel, 'diesel', '#8B7355')}
-              ${renderFuelTank('91', stats.fuel.fuel91, 'fuel91', '#22c55e')}
-              ${renderFuelTank('95', stats.fuel.fuel95, 'fuel95', '#ef4444')}
-              ${renderFuelTank('98', stats.fuel.fuel98, 'fuel98', '#e5e5e5')}
-              ${renderFuelTank('إيثانول', stats.fuel.ethanol, 'ethanol', '#3b82f6')}
+              ${renderFuelTank('ديزل', fuel.diesel ?? 0, 'diesel', '#8B7355')}
+              ${renderFuelTank('91', fuel.fuel91 ?? 0, 'fuel91', '#22c55e')}
+              ${renderFuelTank('95', fuel.fuel95 ?? 0, 'fuel95', '#ef4444')}
+              ${renderFuelTank('98', fuel.fuel98 ?? 0, 'fuel98', '#e5e5e5')}
+              ${renderFuelTank('إيثانول', fuel.ethanol ?? 0, 'ethanol', '#3b82f6')}
             </div>
           </div>
         </div>
@@ -456,7 +547,269 @@ async function renderStudentDashboard() {
 
     updateNotificationBadge();
   } catch (error) {
-    mainContent.innerHTML = `<div class="error-message">${error.message}</div>`;
+    console.error('renderStudentDashboard:', error);
+    const msg = error.message || 'تعذر تحميل الرصيد';
+    const isConnection = /fetch|connection|refused|network/i.test(msg) || msg.includes('السيرفر');
+    mainContent.innerHTML = `
+      <div class="error-message card">
+        <div class="card-body">
+          <p><i class="fas fa-exclamation-circle"></i> ${msg}</p>
+          ${isConnection ? '<p class="hint">تأكد من تشغيل السيرفر: <code>npm start</code> في مجلد المشروع. إن كان المتصفح أو إضافة تحجب الطلبات (مثل مانع إعلانات) جرّب تعطيلها لهذا الموقع.</p>' : ''}
+        </div>
+      </div>`;
+  }
+}
+
+// صفحة أسرتي للطالب (عرض فقط)
+async function renderStudentGroupPage() {
+  if (!currentUser || !currentUser.group_id) {
+    mainContent.innerHTML = `
+      <div class="card">
+        <div class="card-body">
+          <p class="empty-message"><i class="fas fa-users"></i> لم تُحدد أسرة لك. تواصل مع المشرف.</p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  mainContent.innerHTML = `<div class="loading-message"><i class="fas fa-spinner fa-spin"></i> جاري تحميل أسرتك...</div>`;
+
+  try {
+    const group = await GroupsAPI.getDetails(currentUser.group_id);
+    const fuel = group.fuel || { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
+    const totalLiters =
+      (fuel.diesel ?? 0) +
+      (fuel.fuel91 ?? 0) +
+      (fuel.fuel95 ?? 0) +
+      (fuel.fuel98 ?? 0) +
+      (fuel.ethanol ?? 0);
+
+    let globalHide = false;
+    try {
+      const settingsRes = await SettingsAPI.getAll();
+      const settings = settingsRes?.settings || {};
+      globalHide = settings.global_hide_points === '1'
+        || settings.global_hide_points === 1
+        || settings.global_hide_points === true
+        || String(settings.global_hide_points || '').toLowerCase() === 'true';
+    } catch (e) { /* ignore */ }
+    const isPointsHidden = globalHide || currentUser.points_hidden === 1 || currentUser.points_hidden === true;
+
+    mainContent.innerHTML = `
+      <div class="page-header">
+        <h1><i class="fas fa-users"></i> أسرتي - ${group.name || 'الأسرة'}</h1>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <h2>نقاط الأسرة</h2>
+          ${isPointsHidden
+            ? `<span><i class="fas fa-eye-slash"></i> النقاط مخفية</span>`
+            : `<span>المجموع: ${group.total_points ?? 0} نقطة (أفراد: ${group.members_points ?? 0} + أسرة: ${group.direct_points ?? 0}) • ${totalLiters} لتر</span>`
+          }
+        </div>
+        <div class="card-body">
+          ${isPointsHidden ? `
+            <div class="card points-hidden-card">
+              <div class="card-body">
+                <div class="points-hidden-message">
+                  <i class="fas fa-eye-slash"></i>
+                  <h3>تم إخفاء النقاط مؤقتاً</h3>
+                  <p>لا يمكنك رؤية نقاط الأسرة حالياً. تواصل مع المشرف لمزيد من المعلومات.</p>
+                </div>
+              </div>
+            </div>
+          ` : `
+            <h3>خزانات الوقود</h3>
+            <div class="fuel-tanks-container">
+              ${renderFuelTank('ديزل', fuel.diesel ?? 0, 'diesel', '#8B7355')}
+              ${renderFuelTank('91', fuel.fuel91 ?? 0, 'fuel91', '#22c55e')}
+              ${renderFuelTank('95', fuel.fuel95 ?? 0, 'fuel95', '#ef4444')}
+              ${renderFuelTank('98', fuel.fuel98 ?? 0, 'fuel98', '#e5e5e5')}
+              ${renderFuelTank('إيثانول', fuel.ethanol ?? 0, 'ethanol', '#3b82f6')}
+            </div>
+          `}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <h2>أعضاء الأسرة (${(group.members || []).length})</h2>
+        </div>
+        <div class="card-body">
+          ${(group.members && group.members.length) > 0 ? `
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>الاسم</th>
+                    <th>${isPointsHidden ? '—' : 'النقاط'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${group.members.map(m => `
+                    <tr>
+                      <td>${m.name || '-'}</td>
+                      <td>${isPointsHidden ? '—' : (m.total_points ?? 0)}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          ` : '<p>لا يوجد أعضاء في هذه الأسرة</p>'}
+        </div>
+      </div>`;
+  } catch (error) {
+    console.error('renderStudentGroupPage:', error);
+    mainContent.innerHTML = `<div class="error-message"><i class="fas fa-exclamation-circle"></i> ${error.message || 'تعذر تحميل بيانات الأسرة'}</div>`;
+  }
+}
+
+// ==================== Settings Page (Admin/Supervisor) ====================
+async function renderSettingsPage() {
+  mainContent.innerHTML = `<div class="loading-message"><i class="fas fa-spinner fa-spin"></i> جاري تحميل الإعدادات...</div>`;
+
+  try {
+    const res = await SettingsAPI.getAll();
+    const s = res?.settings || {};
+    const boolVal = (v) => v === '1' || v === 1 || v === true || String(v || '').toLowerCase() === 'true';
+
+    const globalHide = boolVal(s.global_hide_points);
+    const autoPourAdd = boolVal(s.auto_pour_add_points_to_group);
+    const pourApproved = boolVal(s.pour_approved_requests_to_group);
+    const pourManual = boolVal(s.pour_manual_adjustments_to_group);
+
+    mainContent.innerHTML = `
+      <div class="page-header">
+        <h1><i class="fas fa-cog"></i> الإعدادات</h1>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>إعدادات العرض</h2>
+        </div>
+        <div class="card-body">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">إخفاء النقاط عن الجميع</div>
+              <div class="setting-desc">إخفاء النقاط والخزانات عن الطلاب والأسر (للإعلان عن الفائز)</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-global-hide" ${globalHide ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>إعدادات النقاط</h2>
+        </div>
+        <div class="card-body">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">الصب التلقائي للأسرة</div>
+              <div class="setting-desc">عند إضافة نقاط للفرد (إضافة فقط)، تُضاف تلقائياً لأسرته</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-auto-pour-add" ${autoPourAdd ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">صب الطلبات المقبولة</div>
+              <div class="setting-desc">عند قبول طلب الطالب، تُضاف النقاط لأسرته</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-pour-approved" ${pourApproved ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">صب التعديلات اليدوية</div>
+              <div class="setting-desc">عند تعديل نقاط الطالب يدوياً (إضافة/خصم)، تتأثر نقاط أسرته</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-pour-manual" ${pourManual ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+          ${pourManual && autoPourAdd ? `<p class="hint">ملاحظة: عند تفعيل "صب التعديلات اليدوية" سيتم تجاهل "الصب التلقائي للأسرة" لتجنب التكرار.</p>` : ''}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>سجل العمليات</h2>
+        </div>
+        <div class="card-body">
+          <button class="btn btn-primary" onclick="showPointsLogModal()">عرض سجل العمليات</button>
+        </div>
+      </div>
+    `;
+
+    const saveBool = async (key, checked) => {
+      await SettingsAPI.set(key, checked ? '1' : '0');
+    };
+
+    document.getElementById('setting-global-hide')?.addEventListener('change', async (e) => {
+      try { await saveBool('global_hide_points', e.target.checked); } catch (err) { alert(err.message); }
+    });
+    document.getElementById('setting-auto-pour-add')?.addEventListener('change', async (e) => {
+      try { await saveBool('auto_pour_add_points_to_group', e.target.checked); } catch (err) { alert(err.message); }
+    });
+    document.getElementById('setting-pour-approved')?.addEventListener('change', async (e) => {
+      try { await saveBool('pour_approved_requests_to_group', e.target.checked); } catch (err) { alert(err.message); }
+    });
+    document.getElementById('setting-pour-manual')?.addEventListener('change', async (e) => {
+      try {
+        await saveBool('pour_manual_adjustments_to_group', e.target.checked);
+        // إعادة رسم الصفحة لتحديث الملاحظة
+        renderSettingsPage();
+      } catch (err) { alert(err.message); }
+    });
+  } catch (error) {
+    mainContent.innerHTML = `<div class="error-message card"><div class="card-body"><p><i class="fas fa-exclamation-circle"></i> ${error.message || 'تعذر تحميل الإعدادات'}</p></div></div>`;
+  }
+}
+
+async function showPointsLogModal() {
+  try {
+    const res = await SettingsAPI.getPointsLog(200);
+    const rows = res?.rows || [];
+    openModal('سجل العمليات', `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>الوقت</th>
+              <th>النوع</th>
+              <th>هدف</th>
+              <th>نقاط</th>
+              <th>%</th>
+              <th>السبب</th>
+              <th>بواسطة</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${(r.created_at || '').toString().replace('T',' ').slice(0,19)}</td>
+                <td>${r.operation_type || '-'}</td>
+                <td>${r.target_type || '-'} #${r.target_id ?? '-'}</td>
+                <td>${r.points ?? '-'}</td>
+                <td>${r.percentage ?? '-'}</td>
+                <td>${(r.reason || '').toString()}</td>
+                <td>${r.performed_by_name || r.performed_by || '-'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `, `<button class="btn btn-secondary btn-small" onclick="closeModal()">إغلاق</button>`);
+  } catch (e) {
+    alert(e.message || 'تعذر تحميل سجل العمليات');
   }
 }
 
@@ -542,6 +895,8 @@ async function renderAdminDashboard() {
 }
 
 // ==================== Groups Page ====================
+let currentGroupId = null;
+
 async function renderGroupsPage() {
   try {
     const groups = await GroupsAPI.getAll();
@@ -633,13 +988,12 @@ async function renderGroupsPage() {
                     <tr>
                       <td>${i + 1}</td>
                       <td>
-                        <a href="#" onclick="viewGroupDetails(${g.id})" class="group-link">${g.name}</a>
+                        <a href="#" onclick="viewGroupDetails(${g.id}); return false;" class="group-link">${g.name}</a>
                       </td>
                       <td>${g.student_count}</td>
-                      <td>${g.members_points || 0}</td>
-                      <td>${g.direct_points || 0}</td>
+                      <td>${g.members_points ?? 0}</td>
+                      <td>${g.direct_points ?? 0}</td>
                       <td>
-                        <span class="fuel-indicator">${getFuelEmoji(g.total_points || 0)}</span>
                         <span class="points-badge">${g.total_points || 0}</span>
                       </td>
                       <td>
@@ -647,20 +1001,20 @@ async function renderGroupsPage() {
                           <button class="action-btn view" onclick="viewGroupDetails(${g.id})" title="عرض التفاصيل">
                             <i class="fas fa-eye"></i>
                           </button>
-                          <button class="action-btn add-points" onclick="showAddGroupPointsModal(${g.id}, '${g.name}', ${g.total_points || 0})" title="إضافة نقاط">
+                          <button class="action-btn add-points" onclick="showAddGroupPointsModal(${g.id}, '${(g.name || '').replace(/'/g, "\\'")}', ${g.total_points || 0})" title="إضافة نقاط">
                             <i class="fas fa-plus"></i>
                           </button>
-                          <button class="action-btn subtract-points" onclick="showSubtractGroupPointsModal(${g.id}, '${g.name}', ${g.total_points || 0})" title="خصم نقاط">
+                          <button class="action-btn subtract-points" onclick="showSubtractGroupPointsModal(${g.id}, '${(g.name || '').replace(/'/g, "\\'")}', ${g.total_points || 0})" title="خصم نقاط">
                             <i class="fas fa-minus"></i>
                           </button>
-                          <button class="action-btn percentage" onclick="showGroupPercentageModal(${g.id}, '${g.name}', 'add')" title="زيادة مئوية">
-                            <i class="fas fa-plus-circle"></i>%
+                          <button class="action-btn percentage" onclick="showGroupPercentageModal(${g.id}, '${(g.name || '').replace(/'/g, "\\'")}', 'add')" title="زيادة مئوية">
+                            <i class="fas fa-percent"></i>+
                           </button>
-                          <button class="action-btn percentage-subtract" onclick="showGroupPercentageModal(${g.id}, '${g.name}', 'subtract')" title="خصم مئوي">
-                            <i class="fas fa-minus-circle"></i>%
+                          <button class="action-btn percentage-subtract" onclick="showGroupPercentageModal(${g.id}, '${(g.name || '').replace(/'/g, "\\'")}', 'subtract')" title="خصم مئوي">
+                            <i class="fas fa-percent"></i>-
                           </button>
                           ${currentUser.role === 'admin' ? `
-                            <button class="action-btn edit" onclick="showEditGroupModal(${g.id}, '${g.name}')" title="تعديل">
+                            <button class="action-btn edit" onclick="showEditGroupModal(${g.id}, '${(g.name || '').replace(/'/g, "\\'")}')" title="تعديل">
                               <i class="fas fa-edit"></i>
                             </button>
                             <button class="action-btn delete" onclick="deleteGroup(${g.id})" title="حذف">
@@ -689,7 +1043,6 @@ async function renderGroupsPage() {
   }
 }
 
-// عرض تفاصيل الأسرة مع الخزانات
 async function viewGroupDetails(groupId) {
   currentGroupId = groupId;
   navigateTo('group-details');
@@ -729,17 +1082,17 @@ async function renderGroupDetailsPage(groupId) {
         </div>
         <div class="card-body">
           <div class="group-actions-grid">
-            <button class="btn btn-primary" onclick="showAddGroupPointsModal(${group.id}, '${group.name}', ${group.total_points})">
+            <button class="btn btn-primary" onclick="showAddGroupPointsModal(${group.id}, '${(group.name || '').replace(/'/g, "\\'")}', ${group.total_points})">
               <i class="fas fa-plus"></i> إضافة نقاط
             </button>
-            <button class="btn btn-danger" onclick="showSubtractGroupPointsModal(${group.id}, '${group.name}', ${group.total_points})">
+            <button class="btn btn-danger" onclick="showSubtractGroupPointsModal(${group.id}, '${(group.name || '').replace(/'/g, "\\'")}', ${group.total_points})">
               <i class="fas fa-minus"></i> خصم نقاط
             </button>
-            <button class="btn btn-success" onclick="showGroupPercentageModal(${group.id}, '${group.name}', 'add')">
-              <i class="fas fa-plus-circle"></i> زيادة مئوية
+            <button class="btn btn-success" onclick="showGroupPercentageModal(${group.id}, '${(group.name || '').replace(/'/g, "\\'")}', 'add')">
+              <i class="fas fa-percent"></i> زيادة مئوية
             </button>
-            <button class="btn btn-warning" onclick="showGroupPercentageModal(${group.id}, '${group.name}', 'subtract')">
-              <i class="fas fa-minus-circle"></i> خصم مئوي
+            <button class="btn btn-warning" onclick="showGroupPercentageModal(${group.id}, '${(group.name || '').replace(/'/g, "\\'")}', 'subtract')">
+              <i class="fas fa-percent"></i> خصم مئوي
             </button>
           </div>
         </div>
@@ -782,7 +1135,6 @@ async function renderGroupDetailsPage(groupId) {
   }
 }
 
-// ==================== Group Points Modals ====================
 function showAddGroupPointsModal(groupId, groupName, currentPoints) {
   openModal(`إضافة نقاط للأسرة - ${groupName}`, `
     <div class="current-fuel-status">
@@ -876,16 +1228,23 @@ async function addGroupPoints(groupId) {
   const applyToMembers = document.getElementById('apply-to-members').checked;
 
   try {
+    if (!Number.isFinite(points) || points < 1) {
+      notifyUser('الرجاء إدخال عدد نقاط صحيح', 'error');
+      return;
+    }
+    setModalBusy(true);
     const result = await GroupsAPI.addPoints(groupId, points, 'add', reason, applyToMembers, currentUser.id);
     closeModal();
-    alert(result.message || 'تم إضافة النقاط بنجاح');
+    notifyUser(result.message || 'تم إضافة النقاط بنجاح', 'success');
     if (currentPage === 'group-details') {
       renderGroupDetailsPage(groupId);
     } else {
       renderGroupsPage();
     }
   } catch (error) {
-    alert(error.message);
+    notifyUser(error.message, 'error');
+  } finally {
+    setModalBusy(false);
   }
 }
 
@@ -895,16 +1254,23 @@ async function subtractGroupPoints(groupId) {
   const applyToMembers = document.getElementById('apply-to-members').checked;
 
   try {
+    if (!Number.isFinite(points) || points < 1) {
+      notifyUser('الرجاء إدخال عدد نقاط صحيح', 'error');
+      return;
+    }
+    setModalBusy(true);
     const result = await GroupsAPI.addPoints(groupId, points, 'subtract', reason, applyToMembers, currentUser.id);
     closeModal();
-    alert(result.message || 'تم خصم النقاط بنجاح');
+    notifyUser(result.message || 'تم خصم النقاط بنجاح', 'success');
     if (currentPage === 'group-details') {
       renderGroupDetailsPage(groupId);
     } else {
       renderGroupsPage();
     }
   } catch (error) {
-    alert(error.message);
+    notifyUser(error.message, 'error');
+  } finally {
+    setModalBusy(false);
   }
 }
 
@@ -914,23 +1280,30 @@ async function applyGroupPercentage(groupId, action = 'add') {
   const applyToMembers = document.getElementById('apply-percentage-to-members').checked;
 
   try {
+    if (!Number.isFinite(percentage) || percentage < 1 || percentage > 100) {
+      notifyUser('الرجاء إدخال نسبة بين 1 و 100', 'error');
+      return;
+    }
+    setModalBusy(true);
     const result = await GroupsAPI.addPercentage(groupId, percentage, applyToMembers, reason, currentUser.id, action);
     closeModal();
-    alert(result.message || (action === 'subtract' ? 'تم تطبيق الخصم المئوي بنجاح' : 'تم تطبيق الزيادة المئوية بنجاح'));
+    notifyUser(result.message || (action === 'subtract' ? 'تم تطبيق الخصم المئوي بنجاح' : 'تم تطبيق الزيادة المئوية بنجاح'), 'success');
     if (currentPage === 'group-details') {
       renderGroupDetailsPage(groupId);
     } else {
       renderGroupsPage();
     }
   } catch (error) {
-    alert(error.message);
+    notifyUser(error.message, 'error');
+  } finally {
+    setModalBusy(false);
   }
 }
 
-// للتوافق مع الكود القديم
 async function addGroupPercentage(groupId) {
   await applyGroupPercentage(groupId, 'add');
 }
+
 
 function showAddGroupModal() {
   openModal('إضافة أسرة جديدة', `
@@ -1131,7 +1504,6 @@ async function renderStudentsPage() {
                       <td>${s.group_name || 'غير محدد'}</td>
                       <td>
                         <div class="points-cell">
-                          <span class="fuel-indicator" id="fuel-${s.id}">${getFuelEmoji(s.total_points || 0)}</span>
                           <span class="points-badge" id="points-${s.id}">${s.total_points || 0}</span>
                           ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
                             <div class="points-actions">
@@ -1357,7 +1729,8 @@ async function addPoints(studentId, groupId = null) {
   const applyToGroup = applyToGroupCheckbox ? applyToGroupCheckbox.checked : false;
 
   try {
-    const response = await fetch(`${API_URL}/students/${studentId}/points`, {
+    const baseUrl = window.API_URL || window.location.origin + '/api';
+    const response = await fetch(`${baseUrl}/students/${studentId}/points`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1370,7 +1743,8 @@ async function addPoints(studentId, groupId = null) {
       })
     });
 
-    const data = await response.json();
+    const contentType = response.headers.get('Content-Type') || '';
+    const data = contentType.includes('application/json') ? await response.json() : { success: false, message: 'استجابة غير صحيحة من الخادم' };
     if (data.success) {
       closeModal();
       // تحديث النقاط والوقود في الصفحة بدون إعادة تحميل
@@ -1392,7 +1766,8 @@ async function subtractPoints(studentId, groupId = null) {
   const applyToGroup = applyToGroupCheckbox ? applyToGroupCheckbox.checked : false;
 
   try {
-    const response = await fetch(`${API_URL}/students/${studentId}/points`, {
+    const baseUrl = window.API_URL || window.location.origin + '/api';
+    const response = await fetch(`${baseUrl}/students/${studentId}/points`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1405,7 +1780,8 @@ async function subtractPoints(studentId, groupId = null) {
       })
     });
 
-    const data = await response.json();
+    const contentType = response.headers.get('Content-Type') || '';
+    const data = contentType.includes('application/json') ? await response.json() : { success: false, message: 'استجابة غير صحيحة من الخادم' };
     if (data.success) {
       closeModal();
       // تحديث النقاط والوقود في الصفحة بدون إعادة تحميل
@@ -1428,66 +1804,147 @@ function updateStudentPoints(studentId, newPoints) {
   if (fuelEl) fuelEl.textContent = getFuelEmoji(newPoints);
 }
 
-// ==================== Requests Page ====================
-async function renderRequestsPage() {
+// تبديل حالة إخفاء/إظهار النقاط
+async function togglePointsVisibility(studentId, hide, studentName) {
+  const action = hide ? 'إخفاء' : 'إظهار';
+  let reason = '';
+
+  if (hide) {
+    reason = prompt(`سبب ${action} النقاط للطالب ${studentName} (اختياري):`);
+    if (reason === null) return; // المستخدم ضغط إلغاء
+  }
+
+  if (!confirm(`هل تريد ${action} النقاط للطالب ${studentName}؟`)) return;
+
   try {
-    const requests = await RequestsAPI.getAll();
+    const baseUrl = window.API_URL || window.location.origin + '/api';
+    const response = await fetch(`${baseUrl}/students/${studentId}/toggle-points-visibility`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden: hide, reason })
+    });
 
-    mainContent.innerHTML = `
-      <div class="page-header">
-        <h1><i class="fas fa-clipboard-list"></i> إدارة الطلبات</h1>
-        <div class="header-actions">
-          <select id="filter-status" onchange="filterRequests()">
-            <option value="">جميع الطلبات</option>
-            <option value="pending">قيد المراجعة</option>
-            <option value="approved">مقبول</option>
-            <option value="rejected">مرفوض</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-body">
-          ${requests.length > 0 ? `
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>الطالب</th>
-                    <th>الأسرة</th>
-                    <th>اللجنة</th>
-                    <th>الوصف</th>
-                    <th>النقاط</th>
-                    <th>الحالة</th>
-                    <th>الإجراءات</th>
-                  </tr>
-                </thead>
-                <tbody id="requests-table">
-                  ${renderRequestsRows(requests)}
-                </tbody>
-              </table>
-            </div>
-          ` : `
-            <div class="empty-state">
-              <i class="fas fa-clipboard-list"></i>
-              <h3>لا توجد طلبات</h3>
-            </div>
-          `}
-        </div>
-      </div>
-    `;
+    const contentType = response.headers.get('Content-Type') || '';
+    const data = contentType.includes('application/json') ? await response.json() : { success: false, message: 'استجابة غير صحيحة من الخادم' };
+    if (data.success) {
+      alert(`تم ${action} النقاط بنجاح وإرسال إشعار للطالب`);
+      renderStudentsPage();
+    } else {
+      alert(data.message || 'حدث خطأ');
+    }
   } catch (error) {
-    mainContent.innerHTML = `<div class="error-message">${error.message}</div>`;
+    alert(error.message || 'حدث خطأ في الاتصال');
   }
 }
 
-function renderRequestsRows(requests) {
+// ==================== Requests Page ====================
+let _requestsState = {
+  nextCursor: null,
+  totalCount: 0,
+  loadedCount: 0,
+  loading: false,
+  currentFilter: '',
+  rowOffset: 0
+};
+
+let _filterDebounceTimer = null;
+
+async function renderRequestsPage() {
+  _requestsState = { nextCursor: null, totalCount: 0, loadedCount: 0, loading: false, currentFilter: '', rowOffset: 0 };
+
+  mainContent.innerHTML = `
+    <div class="page-header">
+      <h1><i class="fas fa-clipboard-list"></i> إدارة الطلبات</h1>
+      <div class="header-actions">
+        <span id="requests-count-badge" style="font-size:0.85em;color:#64748b;margin-left:12px;"></span>
+        <select id="filter-status" onchange="filterRequests()">
+          <option value="">جميع الطلبات</option>
+          <option value="pending">قيد المراجعة</option>
+          <option value="approved">مقبول</option>
+          <option value="rejected">مرفوض</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الطالب</th>
+                <th>الأسرة</th>
+                <th>اللجنة</th>
+                <th>الوصف</th>
+                <th>النقاط</th>
+                <th>الحالة</th>
+                <th>الإجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="requests-table"></tbody>
+          </table>
+        </div>
+        <div id="requests-load-more" style="text-align:center;padding:16px;"></div>
+      </div>
+    </div>
+  `;
+
+  await loadMoreRequests();
+}
+
+async function loadMoreRequests() {
+  if (_requestsState.loading) return;
+  _requestsState.loading = true;
+
+  const loadMoreEl = document.getElementById('requests-load-more');
+  if (loadMoreEl) loadMoreEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التحميل...';
+
+  try {
+    const result = await RequestsAPI.getAll(
+      _requestsState.currentFilter,
+      _requestsState.nextCursor,
+      50
+    );
+
+    const { data, pagination } = result;
+    _requestsState.nextCursor = pagination.nextCursor;
+    _requestsState.totalCount = pagination.totalCount;
+    _requestsState.loadedCount += data.length;
+
+    const tbody = document.getElementById('requests-table');
+    if (tbody) {
+      tbody.insertAdjacentHTML('beforeend', renderRequestsRows(data, _requestsState.rowOffset));
+      _requestsState.rowOffset += data.length;
+    }
+
+    const badge = document.getElementById('requests-count-badge');
+    if (badge) {
+      badge.textContent = `عرض ${_requestsState.loadedCount} من ${_requestsState.totalCount}`;
+    }
+
+    if (loadMoreEl) {
+      if (pagination.hasNextPage) {
+        loadMoreEl.innerHTML = `<button class="btn btn-secondary" onclick="loadMoreRequests()">تحميل المزيد</button>`;
+      } else if (_requestsState.loadedCount === 0) {
+        loadMoreEl.innerHTML = '<div class="empty-state"><i class="fas fa-clipboard-list"></i><h3>لا توجد طلبات</h3></div>';
+      } else {
+        loadMoreEl.innerHTML = '';
+      }
+    }
+  } catch (error) {
+    if (loadMoreEl) loadMoreEl.innerHTML = `<div class="error-message">${error.message}</div>`;
+  } finally {
+    _requestsState.loading = false;
+  }
+}
+
+function renderRequestsRows(requests, offset = 0) {
   const fuelNames = { 1: 'ديزل', 2: '91', 3: '95', 4: '98', 5: 'إيثانول' };
 
   return requests.map((r, i) => `
     <tr>
-      <td>${i + 1}</td>
+      <td>${offset + i + 1}</td>
       <td>${r.student_name}</td>
       <td>${r.group_name || '-'}</td>
       <td>${r.committee}</td>
@@ -1515,13 +1972,17 @@ function renderRequestsRows(requests) {
 }
 
 async function filterRequests() {
-  const status = document.getElementById('filter-status').value;
-  try {
-    const requests = await RequestsAPI.getAll(status);
-    document.getElementById('requests-table').innerHTML = renderRequestsRows(requests);
-  } catch (error) {
-    alert(error.message);
-  }
+  if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
+  _filterDebounceTimer = setTimeout(async () => {
+    const status = document.getElementById('filter-status').value;
+    _requestsState.currentFilter = status;
+    _requestsState.nextCursor = null;
+    _requestsState.loadedCount = 0;
+    _requestsState.rowOffset = 0;
+    const tbody = document.getElementById('requests-table');
+    if (tbody) tbody.innerHTML = '';
+    await loadMoreRequests();
+  }, 300);
 }
 
 async function approveRequest(id) {
@@ -1942,17 +2403,21 @@ async function loadNotifications() {
 
 async function updateNotificationBadge() {
   try {
+    if (!currentUser || !currentUser.id) return;
     const { count } = await NotificationsAPI.getUnreadCount(currentUser.id);
-    const badge = document.getElementById('notif-badge');
+    const badges = [
+      document.getElementById('notif-badge'),
+      document.getElementById('mobile-notif-badge')
+    ].filter(Boolean);
 
-    if (badge) {
+    badges.forEach(badge => {
       if (count > 0) {
         badge.textContent = count;
         badge.style.display = 'flex';
       } else {
         badge.style.display = 'none';
       }
-    }
+    });
   } catch (error) {
     console.error('Error updating badge:', error);
   }
@@ -2112,6 +2577,12 @@ function openModal(title, body, footer) {
   document.getElementById('modal-body').innerHTML = body;
   document.getElementById('modal-footer').innerHTML = footer;
   document.getElementById('modal-overlay').classList.add('active');
+  markScrollableTables(document.getElementById('modal-body'));
+  // Focus أول input لو موجود (تحسين UX)
+  setTimeout(() => {
+    const first = document.querySelector('#modal-body input, #modal-body select, #modal-body textarea');
+    if (first && typeof first.focus === 'function') first.focus();
+  }, 0);
 }
 
 function closeModal() {

@@ -42,36 +42,46 @@
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
   <script>
     window.OneSignalDeferred = window.OneSignalDeferred || [];
-    OneSignalDeferred.push(async function(OneSignal) {
-      await OneSignal.init({
-        appId: "31ae51d1-51bc-406b-8c05-3cc577d100b0",
-        notifyButton: {
-          enable: true,
-          size: 'medium',
-          position: 'bottom-left',
-          prenotify: true,
-          showCredit: false,
-          text: {
-            'tip.state.unsubscribed': 'اشترك للحصول على الإشعارات',
-            'tip.state.subscribed': 'أنت مشترك في الإشعارات',
-            'tip.state.blocked': 'لقد حظرت الإشعارات',
-            'message.prenotify': 'اضغط للاشتراك في الإشعارات',
-            'message.action.subscribed': 'شكراً للاشتراك!',
-            'message.action.resubscribed': 'أنت مشترك في الإشعارات',
-            'message.action.unsubscribed': 'لن تستلم إشعارات بعد الآن',
-            'dialog.main.title': 'إدارة إشعارات الموقع',
-            'dialog.main.button.subscribe': 'اشتراك',
-            'dialog.main.button.unsubscribe': 'إلغاء الاشتراك',
-            'dialog.blocked.title': 'إلغاء حظر الإشعارات',
-            'dialog.blocked.message': 'اتبع هذه التعليمات للسماح بالإشعارات:'
+    (async () => {
+      // Default (fallback) appId
+      let appId = "31ae51d1-51bc-406b-8c05-3cc577d100b0";
+      try {
+        const res = await fetch('/api/public-config', { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.onesignalAppId) appId = data.onesignalAppId;
+      } catch (e) { /* fallback */ }
+
+      OneSignalDeferred.push(async function(OneSignal) {
+        await OneSignal.init({
+          appId,
+          notifyButton: {
+            enable: true,
+            size: 'medium',
+            position: 'bottom-left',
+            prenotify: true,
+            showCredit: false,
+            text: {
+              'tip.state.unsubscribed': 'اشترك للحصول على الإشعارات',
+              'tip.state.subscribed': 'أنت مشترك في الإشعارات',
+              'tip.state.blocked': 'لقد حظرت الإشعارات',
+              'message.prenotify': 'اضغط للاشتراك في الإشعارات',
+              'message.action.subscribed': 'شكراً للاشتراك!',
+              'message.action.resubscribed': 'أنت مشترك في الإشعارات',
+              'message.action.unsubscribed': 'لن تستلم إشعارات بعد الآن',
+              'dialog.main.title': 'إدارة إشعارات الموقع',
+              'dialog.main.button.subscribe': 'اشتراك',
+              'dialog.main.button.unsubscribe': 'إلغاء الاشتراك',
+              'dialog.blocked.title': 'إلغاء حظر الإشعارات',
+              'dialog.blocked.message': 'اتبع هذه التعليمات للسماح بالإشعارات:'
+            }
+          },
+          welcomeNotification: {
+            title: 'طاقات السلطان ⛽',
+            message: 'شكراً لاشتراكك! ستصلك الإشعارات عند قبول أو رفض طلباتك.'
           }
-        },
-        welcomeNotification: {
-          title: 'طاقات السلطان ⛽',
-          message: 'شكراً لاشتراكك! ستصلك الإشعارات عند قبول أو رفض طلباتك.'
-        }
+        });
       });
-    });
+    })();
   </script>
 </head>
 <body>
@@ -210,7 +220,10 @@
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/sw.js')
-          .then((reg) => console.log('Service Worker مسجل:', reg.scope))
+          .then((reg) => {
+            window.__swReg = reg;
+            console.log('Service Worker مسجل:', reg.scope);
+          })
           .catch((err) => console.log('فشل تسجيل Service Worker:', err));
       });
     }
@@ -220,14 +233,21 @@
     const installBanner = document.getElementById('install-banner');
     const installBtn = document.getElementById('install-btn');
     const installClose = document.getElementById('install-close');
+    const isStandalone = () =>
+      window.matchMedia && window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone === true;
 
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
       deferredPrompt = e;
-      // إظهار البانر بعد 3 ثواني
+      // إظهار البانر (مرة واحدة لكل جلسة) إذا لم يكن مثبتاً ولم يتم إغلاقه
+      const dismissed = sessionStorage.getItem('installBannerDismissed') === '1';
+      if (dismissed || isStandalone()) return;
       setTimeout(() => {
-        installBanner.style.display = 'block';
-      }, 3000);
+        if (!sessionStorage.getItem('installBannerDismissed') && !isStandalone()) {
+          installBanner.style.display = 'block';
+        }
+      }, 2500);
     });
 
     if (installBtn) {
@@ -238,6 +258,7 @@
           console.log('نتيجة التثبيت:', outcome);
           deferredPrompt = null;
           installBanner.style.display = 'none';
+          sessionStorage.setItem('installBannerDismissed', '1');
         }
       });
     }
@@ -245,6 +266,7 @@
     if (installClose) {
       installClose.addEventListener('click', () => {
         installBanner.style.display = 'none';
+        sessionStorage.setItem('installBannerDismissed', '1');
       });
     }
 
