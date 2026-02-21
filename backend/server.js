@@ -700,7 +700,6 @@ app.delete('/api/supervisors/:id', async (req, res) => {
 app.get('/api/students', async (req, res) => {
   const students = await queryAll(`
     SELECT u.id, u.name, u.code, u.group_id, g.name as group_name, u.created_at,
-    COALESCE(u.points_hidden, 0) as points_hidden,
     (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
      COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
     FROM users u
@@ -1164,6 +1163,7 @@ app.get('/api/stats/student/:studentId', async (req, res) => {
     fuel,
     totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol,
     total_points: totalPoints,
+    totalPoints: totalPoints,
     weeklyRequestsCount: weeklyRequests ? weeklyRequests.count : 0,
     weeklyRequestsLimit: 20
   });
@@ -1188,16 +1188,18 @@ app.get('/api/stats/group/:groupId', async (req, res) => {
     'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
     [gid]
   );
-  const totalPoints =
-    Number(membersRequestsSum?.total ?? 0) +
-    Number(membersAdjustmentsSum?.total ?? 0) +
-    Number(directAdjustmentsSum?.total ?? 0);
+  const membersPoints = Number(membersRequestsSum?.total ?? 0) + Number(membersAdjustmentsSum?.total ?? 0);
+  const directPoints = Number(directAdjustmentsSum?.total ?? 0);
+  const totalPoints = membersPoints + directPoints;
 
   const fuel = pointsToFuelTanks(totalPoints);
   res.json({
     fuel,
     totalLiters: fuel.diesel + fuel.fuel91 + fuel.fuel95 + fuel.fuel98 + fuel.ethanol,
-    total_points: totalPoints
+    total_points: totalPoints,
+    totalPoints: totalPoints,
+    membersPoints: membersPoints,
+    directPoints: directPoints
   });
 });
 
@@ -1244,6 +1246,27 @@ app.get('/api/notifications/:userId/unread-count', async (req, res) => {
     [req.params.userId]
   );
   res.json({ count: count ? count.count : 0 });
+});
+
+// فحص جداول التعديلات (للتصحيح)
+app.get('/api/debug/adjustments', async (req, res) => {
+  try {
+    const pointsAdj = await queryAll(`SELECT * FROM points_adjustments ORDER BY created_at DESC`);
+    const groupAdj = await queryAll(`SELECT * FROM group_points_adjustments ORDER BY created_at DESC`);
+
+    // حساب المجموع
+    const studentSum = await queryOne(`SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments WHERE student_id = 2`);
+    const groupSum = await queryOne(`SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = 1`);
+
+    res.json({
+      points_adjustments: pointsAdj,
+      group_points_adjustments: groupAdj,
+      student_2_sum: studentSum?.total || 0,
+      group_1_sum: groupSum?.total || 0
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
 });
 
 // ==================== Reports Routes ====================

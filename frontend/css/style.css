@@ -201,6 +201,15 @@ body {
   background: #16a34a;
 }
 
+.btn-warning {
+  background: var(--warning);
+  color: var(--white);
+}
+
+.btn-warning:hover {
+  background: #d97706;
+}
+
 .btn-secondary {
   background: var(--text-gray);
   color: var(--white);
@@ -998,6 +1007,8 @@ tr:hover {
   opacity: 0;
   visibility: hidden;
   transition: all 0.3s ease;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 .modal-overlay.active {
@@ -1008,12 +1019,13 @@ tr:hover {
 .modal {
   background: var(--white);
   border-radius: 20px;
-  width: 90%;
+  width: 100%;
   max-width: 500px;
-  max-height: 90vh;
+  max-height: 85vh;
   overflow-y: auto;
   transform: translateY(-20px);
   transition: all 0.3s ease;
+  margin: auto;
 }
 
 .modal-overlay.active .modal {
@@ -1026,6 +1038,10 @@ tr:hover {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--white);
+  z-index: 10;
 }
 
 .modal-header h2 {
@@ -1039,6 +1055,11 @@ tr:hover {
   cursor: pointer;
   color: var(--text-gray);
   transition: color 0.3s ease;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .modal-close:hover {
@@ -1055,6 +1076,9 @@ tr:hover {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+  position: sticky;
+  bottom: 0;
+  background: var(--white);
 }
 
 /* ==================== Notifications Panel ==================== */
@@ -1116,33 +1140,6 @@ tr:hover {
   font-size: 0.8rem;
   color: var(--text-gray);
   margin-top: 8px;
-}
-
-/* ==================== Points Hidden Message ==================== */
-.points-hidden-card {
-  border: 2px dashed var(--warning);
-  background: rgba(245, 158, 11, 0.05);
-}
-
-.points-hidden-message {
-  text-align: center;
-  padding: 40px 20px;
-  color: var(--warning);
-}
-
-.points-hidden-message i {
-  font-size: 4rem;
-  margin-bottom: 20px;
-  opacity: 0.7;
-}
-
-.points-hidden-message h3 {
-  margin-bottom: 10px;
-  color: var(--text-dark);
-}
-
-.points-hidden-message p {
-  color: var(--text-gray);
 }
 
 /* ==================== Empty State ==================== */
@@ -1248,7 +1245,8 @@ tr:hover {
 }
 
 /* ==================== Responsive ==================== */
-@media (max-width: 768px) {
+/* تغطية جميع الأجهزة المحمولة والتابلت */
+@media (max-width: 1024px) {
   .mobile-nav {
     display: block;
   }
@@ -1257,7 +1255,7 @@ tr:hover {
     display: flex;
   }
 
-  /* إخفاء الـ Sidebar تماماً على الجوال */
+  /* إخفاء الـ Sidebar تماماً على الجوال والتابلت */
   .sidebar {
     display: none !important;
   }
@@ -1283,14 +1281,41 @@ tr:hover {
     height: 150px;
   }
 
+  /* تحسين المودال للجوال */
+  .modal-overlay {
+    padding: 10px;
+    align-items: flex-start;
+    padding-top: 60px;
+  }
+
   .modal {
-    width: 95%;
-    max-height: 85vh;
+    width: 100%;
+    max-width: 100%;
+    max-height: calc(100vh - 80px);
+    border-radius: 16px;
+  }
+
+  .modal-header {
+    padding: 15px;
+  }
+
+  .modal-header h2 {
+    font-size: 1.1rem;
   }
 
   .modal-body {
+    padding: 15px;
     max-height: 55vh;
     overflow-y: auto;
+  }
+
+  .modal-footer {
+    padding: 15px;
+    flex-direction: column;
+  }
+
+  .modal-footer .btn {
+    width: 100%;
   }
 
   .stats-grid {
@@ -1342,29 +1367,32 @@ tr:hover {
   }
 
   table {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
+    min-width: 600px;
   }
 
   th, td {
-    padding: 10px 8px;
+    padding: 10px 6px;
     white-space: nowrap;
-  }
-
-  /* إخفاء بعض الأعمدة غير المهمة */
-  table th:nth-child(1),
-  table td:nth-child(1) {
-    display: none;
   }
 
   .action-btns {
     flex-direction: row;
-    gap: 5px;
+    gap: 4px;
+    flex-wrap: nowrap;
   }
 
   .action-btn {
-    width: 32px;
-    height: 32px;
-    font-size: 0.8rem;
+    width: 30px;
+    height: 30px;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+  }
+
+  .points-btn {
+    width: 28px;
+    height: 28px;
+    font-size: 0.7rem;
   }
 
   .status-badge {
@@ -1402,38 +1430,16 @@ tr:hover {
     font-size: 3rem;
   }
 
-  /* تحسين نموذج طلب جديد */
+  /* تحسين الـ form inputs */
+  .form-group input,
+  .form-group select,
   .form-group textarea {
-    min-height: 100px;
-  }
-
-  /* تحسين select */
-  .form-group select {
-    font-size: 16px; /* لمنع zoom على iOS */
-  }
-
-  .form-group input {
-    font-size: 16px;
-  }
-
-  /* تحسين عرض الأسبوع */
-  .weekly-progress {
-    padding: 15px;
-  }
-
-  .weekly-progress h3 {
-    font-size: 0.95rem;
-  }
-
-  /* تحسين الأزرار */
-  .btn {
+    font-size: 16px; /* منع الزوم على iOS */
     padding: 12px;
-    font-size: 0.95rem;
   }
 
-  .btn-small {
-    padding: 8px 12px;
-    font-size: 0.8rem;
+  .points-input {
+    font-size: 16px;
   }
 }
 
@@ -1559,7 +1565,7 @@ tr:hover {
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 1024px) {
   .install-banner {
     bottom: 100px;
     left: 10px;
@@ -1575,5 +1581,564 @@ tr:hover {
 
   .main-content {
     padding-top: max(75px, calc(60px + env(safe-area-inset-top)));
+  }
+}
+
+/* ==================== Settings Page ==================== */
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.setting-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  background: var(--bg-light);
+  border-radius: 12px;
+}
+
+.setting-info h3 {
+  font-size: 1rem;
+  color: var(--text-dark);
+  margin-bottom: 5px;
+}
+
+.setting-info p {
+  font-size: 0.85rem;
+  color: var(--text-gray);
+}
+
+/* Toggle Switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 28px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  transition: .4s;
+  border-radius: 28px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 4px;
+  bottom: 4px;
+  background-color: white;
+  transition: .4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--success);
+}
+
+input:checked + .slider:before {
+  transform: translateX(22px);
+}
+
+/* ==================== Group Actions ==================== */
+.group-actions-grid {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.group-link {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.group-link:hover {
+  text-decoration: underline;
+}
+
+.action-btn.view {
+  background: #e0f2fe;
+  color: #0284c7;
+}
+
+.action-btn.add-points {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.action-btn.subtract-points {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.action-btn.percentage {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.action-btn.percentage-subtract {
+  background: #fef3c7;
+  color: #d97706;
+}
+
+/* Checkbox Label */
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+/* Current Fuel Status */
+.current-fuel-status {
+  background: var(--bg-light);
+  padding: 15px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  text-align: center;
+  font-size: 1.1rem;
+}
+
+/* Points Input */
+.points-input {
+  width: 100%;
+  padding: 12px 15px;
+  font-size: 1.2rem;
+  text-align: center;
+  border: 2px solid var(--border-color);
+  border-radius: 10px;
+}
+
+/* ==================== Hidden Points Notice ==================== */
+.hidden-points-notice {
+  background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+  border: 2px dashed var(--primary-light);
+}
+
+.hidden-points-notice .empty-state {
+  padding: 40px 20px;
+}
+
+.hidden-points-notice .empty-state i {
+  color: var(--primary);
+  font-size: 3rem;
+}
+
+.hidden-points-notice .empty-state h3 {
+  color: var(--primary-dark);
+}
+
+/* ==================== Setting Danger State ==================== */
+.setting-item.setting-danger {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border: 2px solid var(--danger);
+}
+
+.setting-item.setting-danger h3 {
+  color: var(--danger);
+}
+
+/* ==================== Group Points Summary ==================== */
+.group-points-summary {
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+  margin-bottom: 30px;
+  flex-wrap: wrap;
+}
+
+.points-summary-item {
+  text-align: center;
+  padding: 15px 25px;
+  background: var(--bg-light);
+  border-radius: 12px;
+}
+
+.points-summary-item .label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-gray);
+  margin-bottom: 5px;
+}
+
+.points-summary-item .value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--primary-dark);
+}
+
+.points-summary-item.total {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+}
+
+.points-summary-item.total .label,
+.points-summary-item.total .value {
+  color: var(--white);
+}
+
+/* ==================== Members List ==================== */
+.members-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.member-item {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 15px 20px;
+  background: var(--bg-light);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+.member-item:hover {
+  transform: translateX(-5px);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.member-item.current-user {
+  background: linear-gradient(135deg, rgba(8, 131, 149, 0.1) 0%, rgba(8, 131, 149, 0.2) 100%);
+  border: 2px solid var(--primary);
+}
+
+.member-rank {
+  width: 35px;
+  height: 35px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary);
+  color: var(--white);
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.member-info {
+  flex: 1;
+}
+
+.member-name {
+  display: block;
+  font-weight: 600;
+  color: var(--text-dark);
+  margin-bottom: 3px;
+}
+
+.member-points {
+  font-size: 0.85rem;
+  color: var(--text-gray);
+}
+
+.member-fuel {
+  font-size: 2rem;
+}
+
+/* ==================== Improved Mobile Responsive ==================== */
+@media (max-width: 1024px) {
+  /* تحسين عرض الخزانات */
+  .fuel-tanks-container {
+    padding: 20px 10px;
+    gap: 10px;
+  }
+
+  .fuel-tank {
+    gap: 10px;
+  }
+
+  .tank-wrapper {
+    width: 55px;
+    height: 130px;
+  }
+
+  .tank-level {
+    font-size: 1.2rem;
+  }
+
+  .tank-label .name {
+    font-size: 0.9rem;
+  }
+
+  .tank-label .liters {
+    font-size: 0.75rem;
+  }
+
+  .tank-stars {
+    font-size: 0.8rem;
+    max-width: 60px;
+  }
+
+  /* تحسين ملخص النقاط */
+  .group-points-summary {
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .points-summary-item {
+    padding: 10px 15px;
+    flex: 1;
+    min-width: 90px;
+  }
+
+  .points-summary-item .label {
+    font-size: 0.75rem;
+  }
+
+  .points-summary-item .value {
+    font-size: 1.2rem;
+  }
+
+  /* تحسين قائمة الأعضاء */
+  .member-item {
+    padding: 12px 15px;
+    gap: 10px;
+  }
+
+  .member-rank {
+    width: 30px;
+    height: 30px;
+    font-size: 0.8rem;
+  }
+
+  .member-name {
+    font-size: 0.9rem;
+  }
+
+  .member-points {
+    font-size: 0.8rem;
+  }
+
+  .member-fuel {
+    font-size: 1.5rem;
+  }
+
+  /* تحسين الإعدادات */
+  .setting-item {
+    flex-direction: column;
+    gap: 15px;
+    text-align: center;
+  }
+
+  .setting-info {
+    text-align: center;
+  }
+
+  /* تحسين الأزرار */
+  .group-actions-grid {
+    flex-direction: column;
+  }
+
+  .group-actions-grid .btn {
+    width: 100%;
+  }
+
+}
+
+/* ==================== Touch Improvements ==================== */
+@media (hover: none) and (pointer: coarse) {
+  /* أجهزة اللمس */
+  .btn, .action-btn, .nav-item, .mobile-nav-item {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .points-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .action-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  /* تحسين التمرير */
+  .table-container {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* إزالة تأثيرات الـ hover على اللمس */
+  .member-item:hover {
+    transform: none;
+  }
+
+  .stat-card:hover {
+    transform: none;
+  }
+}
+
+/* ==================== Safe Area for Notch Devices ==================== */
+@supports (padding: max(0px)) {
+  .mobile-nav {
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  .main-content {
+    padding-left: max(15px, env(safe-area-inset-left));
+    padding-right: max(15px, env(safe-area-inset-right));
+  }
+}
+
+/* ==================== Mobile Groups Cards ==================== */
+/* الكروت تظهر على جميع الشاشات الصغيرة والمتوسطة */
+.groups-cards-mobile {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.groups-table-desktop {
+  display: none;
+}
+
+/* الجدول يظهر فقط على الشاشات الكبيرة (أكبر من 1024px) */
+@media (min-width: 1025px) {
+  .groups-cards-mobile {
+    display: none;
+  }
+
+  .groups-table-desktop {
+    display: block;
+  }
+}
+
+/* تنسيق الكروت */
+.group-card-mobile {
+  background: var(--white);
+  border-radius: 12px;
+  padding: 15px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+  border: 1px solid #e2e8f0;
+}
+
+.group-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.group-rank {
+  width: 28px;
+  height: 28px;
+  background: var(--primary);
+  color: var(--white);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
+.group-name-link {
+  flex: 1;
+  font-weight: 600;
+  color: var(--primary-dark);
+  text-decoration: none;
+  font-size: 1rem;
+}
+
+.group-total {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.group-total .fuel-indicator {
+  font-size: 1.2rem;
+}
+
+.group-total .points-badge {
+  font-size: 0.8rem;
+  padding: 4px 10px;
+}
+
+.group-card-stats {
+  display: flex;
+  justify-content: space-around;
+  margin-bottom: 12px;
+  background: var(--bg-light);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.group-card-stats .stat-item {
+  text-align: center;
+}
+
+.group-card-stats .stat-label {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-gray);
+  margin-bottom: 3px;
+}
+
+.group-card-stats .stat-value {
+  display: block;
+  font-weight: 700;
+  color: var(--text-dark);
+  font-size: 0.95rem;
+}
+
+.group-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.group-card-actions .action-btn {
+  width: 38px;
+  height: 38px;
+  font-size: 0.85rem;
+}
+
+/* ==================== Print Styles ==================== */
+@media print {
+  .sidebar, .mobile-nav, .mobile-header, .notification-btn {
+    display: none !important;
+  }
+
+  .main-content {
+    margin: 0;
+    padding: 20px;
+  }
+
+  .card {
+    break-inside: avoid;
+    box-shadow: none;
+    border: 1px solid #e2e8f0;
   }
 }

@@ -190,3 +190,18 @@ const ExportAPI = {
 
   allPDF: () => `${API_URL}/export/all`
 };
+
+// ==================== Settings API ====================
+const SettingsAPI = {
+  getAll: () => apiCall('/settings'),
+
+  update: (key, value) => apiCall('/settings', {
+    method: 'POST',
+    body: JSON.stringify({ key, value })
+  })
+};
+
+// ==================== Points Log API ====================
+const PointsLogAPI = {
+  getAll: () => apiCall('/points-log')
+};

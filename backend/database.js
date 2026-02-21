@@ -111,7 +111,6 @@ const createTables = async () => {
       password TEXT,
       role TEXT NOT NULL CHECK(role IN ('admin', 'supervisor', 'student')),
       group_id INTEGER,
-      points_hidden INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (group_id) REFERENCES groups(id)
     )`,
@@ -161,6 +160,12 @@ const createTables = async () => {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (group_id) REFERENCES groups(id),
       FOREIGN KEY (adjusted_by) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT UNIQUE NOT NULL,
+      value TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE TABLE IF NOT EXISTS points_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

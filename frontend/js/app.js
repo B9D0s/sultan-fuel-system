@@ -252,9 +252,11 @@ function buildSidebar() {
       <a class="nav-item active" data-page="dashboard">
         <i class="fas fa-gas-pump"></i> رصيدي
       </a>
-      <a class="nav-item" data-page="my-group">
-        <i class="fas fa-users"></i> أسرتي
-      </a>
+      ${currentUser.group_id ? `
+        <a class="nav-item" data-page="my-group">
+          <i class="fas fa-users"></i> أسرتي
+        </a>
+      ` : ''}
       <a class="nav-item" data-page="new-request">
         <i class="fas fa-plus-circle"></i> طلب جديد
       </a>
@@ -340,10 +342,12 @@ function buildMobileNav() {
         <i class="fas fa-gas-pump"></i>
         <span>رصيدي</span>
       </button>
-      <button class="mobile-nav-item" data-page="my-group">
-        <i class="fas fa-users"></i>
-        <span>أسرتي</span>
-      </button>
+      ${currentUser.group_id ? `
+        <button class="mobile-nav-item" data-page="my-group">
+          <i class="fas fa-users"></i>
+          <span>أسرتي</span>
+        </button>
+      ` : ''}
       <button class="mobile-nav-item" data-page="new-request">
         <i class="fas fa-plus-circle"></i>
         <span>طلب جديد</span>
@@ -431,10 +435,16 @@ function navigateTo(page) {
       renderMyRequestsPage();
       break;
     case 'my-group':
-      renderStudentGroupPage();
+      if (currentUser.role === 'student') {
+        renderStudentGroupPage();
+      } else {
+        if (typeof renderMyGroupPage === 'function') renderMyGroupPage();
+      }
       break;
   }
 }
+
+let currentGroupId = null;
 
 // ==================== Student Dashboard ====================
 async function renderStudentDashboard() {
@@ -455,7 +465,16 @@ async function renderStudentDashboard() {
     const fuel = stats?.fuel || { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
     const progressPercent = Math.min(100, Math.round((count / limit) * 100));
 
-    const isPointsHidden = globalHide || currentUser.points_hidden === 1 || currentUser.points_hidden === true;
+    const hidePoints = globalHide || currentUser.points_hidden === 1 || currentUser.points_hidden === true;
+
+    let groupInfo = null;
+    if (currentUser.group_id) {
+      try {
+        groupInfo = await GroupsAPI.getDetails(currentUser.group_id);
+      } catch (e) {
+        console.log('لا يمكن جلب معلومات الأسرة');
+      }
+    }
 
     mainContent.innerHTML = `
       <div class="page-header">
@@ -479,20 +498,20 @@ async function renderStudentDashboard() {
         </div>
       </div>
 
-      ${isPointsHidden ? `
-        <div class="card points-hidden-card">
+      ${hidePoints ? `
+        <div class="card hidden-points-notice">
           <div class="card-body">
-            <div class="points-hidden-message">
+            <div class="empty-state">
               <i class="fas fa-eye-slash"></i>
-              <h3>تم إخفاء النقاط مؤقتاً</h3>
-              <p>لا يمكنك رؤية النقاط حالياً. تواصل مع المشرف لمزيد من المعلومات.</p>
+              <h3>النقاط مخفية حالياً</h3>
+              <p>سيتم الكشف عن النقاط قريباً. ترقبوا الإعلان!</p>
             </div>
           </div>
         </div>
       ` : `
         <div class="card">
           <div class="card-header">
-            <h2>خزانات الوقود</h2>
+            <h2>خزانات الوقود الخاصة بي</h2>
             <span>المجموع: ${totalLiters} لتر • ${totalPoints} نقطة</span>
           </div>
           <div class="card-body">
@@ -505,6 +524,24 @@ async function renderStudentDashboard() {
             </div>
           </div>
         </div>
+
+        ${groupInfo ? `
+          <div class="card" style="margin-top: 20px;">
+            <div class="card-header">
+              <h2><i class="fas fa-users"></i> خزانات أسرتي - ${groupInfo.name}</h2>
+              <span>المجموع: ${groupInfo.fuel.diesel + groupInfo.fuel.fuel91 + groupInfo.fuel.fuel95 + groupInfo.fuel.fuel98 + groupInfo.fuel.ethanol} لتر (${(groupInfo.fuel.diesel * 1) + (groupInfo.fuel.fuel91 * 2) + (groupInfo.fuel.fuel95 * 3) + (groupInfo.fuel.fuel98 * 4) + (groupInfo.fuel.ethanol * 5)} نقطة)</span>
+            </div>
+            <div class="card-body">
+              <div class="fuel-tanks-container">
+                ${renderFuelTank('ديزل', groupInfo.fuel.diesel, 'diesel', '#8B7355')}
+                ${renderFuelTank('91', groupInfo.fuel.fuel91, 'fuel91', '#22c55e')}
+                ${renderFuelTank('95', groupInfo.fuel.fuel95, 'fuel95', '#ef4444')}
+                ${renderFuelTank('98', groupInfo.fuel.fuel98, 'fuel98', '#e5e5e5')}
+                ${renderFuelTank('إيثانول', groupInfo.fuel.ethanol, 'ethanol', '#3b82f6')}
+              </div>
+            </div>
+          </div>
+        ` : ''}
       `}
     `;
 
@@ -877,13 +914,69 @@ async function renderGroupsPage() {
       <div class="card">
         <div class="card-body">
           ${groups.length > 0 ? `
-            <div class="table-container">
+            <!-- عرض الكروت للجوال -->
+            <div class="groups-cards-mobile">
+              ${groups.map((g, i) => `
+                <div class="group-card-mobile">
+                  <div class="group-card-header">
+                    <span class="group-rank">${i + 1}</span>
+                    <a href="#" onclick="viewGroupDetails(${g.id})" class="group-name-link">${g.name}</a>
+                    <span class="group-total">
+                      <span class="fuel-indicator">${getFuelEmoji(g.total_points || 0)}</span>
+                      <span class="points-badge">${g.total_points || 0}</span>
+                    </span>
+                  </div>
+                  <div class="group-card-stats">
+                    <div class="stat-item">
+                      <span class="stat-label">الطلاب</span>
+                      <span class="stat-value">${g.student_count}</span>
+                    </div>
+                    <div class="stat-item">
+                      <span class="stat-label">الأفراد</span>
+                      <span class="stat-value">${g.members_points || 0}</span>
+                    </div>
+                    <div class="stat-item">
+                      <span class="stat-label">الأسرة</span>
+                      <span class="stat-value">${g.direct_points || 0}</span>
+                    </div>
+                  </div>
+                  <div class="group-card-actions">
+                    <button class="action-btn view" onclick="viewGroupDetails(${g.id})" title="عرض">
+                      <i class="fas fa-eye"></i>
+                    </button>
+                    <button class="action-btn add-points" onclick="showAddGroupPointsModal(${g.id}, '${g.name}', ${g.total_points || 0})" title="إضافة">
+                      <i class="fas fa-plus"></i>
+                    </button>
+                    <button class="action-btn subtract-points" onclick="showSubtractGroupPointsModal(${g.id}, '${g.name}', ${g.total_points || 0})" title="خصم">
+                      <i class="fas fa-minus"></i>
+                    </button>
+                    <button class="action-btn percentage" onclick="showGroupPercentageModal(${g.id}, '${g.name}', 'add')" title="+%">
+                      <i class="fas fa-percentage"></i>+
+                    </button>
+                    <button class="action-btn percentage-subtract" onclick="showGroupPercentageModal(${g.id}, '${g.name}', 'subtract')" title="-%">
+                      <i class="fas fa-percentage"></i>-
+                    </button>
+                    ${currentUser.role === 'admin' ? `
+                      <button class="action-btn edit" onclick="showEditGroupModal(${g.id}, '${g.name}')" title="تعديل">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      <button class="action-btn delete" onclick="deleteGroup(${g.id})" title="حذف">
+                        <i class="fas fa-trash"></i>
+                      </button>
+                    ` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+
+            <!-- عرض الجدول للديسكتوب -->
+            <div class="table-container groups-table-desktop">
               <table>
                 <thead>
                   <tr>
                     <th>#</th>
                     <th>اسم الأسرة</th>
-                    <th>الأفراد</th>
+                    <th>عدد الطلاب</th>
                     <th>نقاط الأفراد</th>
                     <th>نقاط الأسرة</th>
                     <th>الإجمالي</th>
@@ -1207,6 +1300,11 @@ async function applyGroupPercentage(groupId, action = 'add') {
   }
 }
 
+async function addGroupPercentage(groupId) {
+  await applyGroupPercentage(groupId, 'add');
+}
+
+
 function showAddGroupModal() {
   openModal('إضافة أسرة جديدة', `
     <div class="form-group">
@@ -1409,10 +1507,10 @@ async function renderStudentsPage() {
                           <span class="points-badge" id="points-${s.id}">${s.total_points || 0}</span>
                           ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
                             <div class="points-actions">
-                              <button class="points-btn add" onclick="showAddPointsModal(${s.id}, '${s.name}', ${s.total_points || 0})" title="إضافة نقاط">
+                              <button class="points-btn add" onclick="showAddPointsModal(${s.id}, '${s.name}', ${s.total_points || 0}, ${s.group_id || 'null'})" title="إضافة نقاط">
                                 <i class="fas fa-plus"></i>
                               </button>
-                              <button class="points-btn subtract" onclick="showSubtractPointsModal(${s.id}, '${s.name}', ${s.total_points || 0})" title="خصم نقاط">
+                              <button class="points-btn subtract" onclick="showSubtractPointsModal(${s.id}, '${s.name}', ${s.total_points || 0}, ${s.group_id || 'null'})" title="خصم نقاط">
                                 <i class="fas fa-minus"></i>
                               </button>
                             </div>
@@ -1422,11 +1520,6 @@ async function renderStudentsPage() {
                       ${currentUser.role === 'admin' || currentUser.role === 'supervisor' ? `
                         <td>
                           <div class="action-btns">
-                            <button class="action-btn ${s.points_hidden ? 'visibility-off' : 'visibility-on'}"
-                                    onclick="togglePointsVisibility(${s.id}, ${!s.points_hidden}, '${s.name}')"
-                                    title="${s.points_hidden ? 'إظهار النقاط' : 'إخفاء النقاط'}">
-                              <i class="fas fa-${s.points_hidden ? 'eye-slash' : 'eye'}"></i>
-                            </button>
                             ${currentUser.role === 'admin' ? `
                               <button class="action-btn edit" onclick='showEditStudentModal(${JSON.stringify(s)})'>
                                 <i class="fas fa-edit"></i>
@@ -1570,7 +1663,7 @@ function getFuelName(points) {
   return 'ديزل';
 }
 
-function showAddPointsModal(studentId, studentName, currentPoints = 0) {
+function showAddPointsModal(studentId, studentName, currentPoints = 0, groupId = null) {
   openModal(`إضافة نقاط - ${studentName}`, `
     <div class="current-fuel-status">
       <span>الوقود الحالي: ${getFuelEmoji(currentPoints)} ${getFuelName(currentPoints)} (${currentPoints} نقاط)</span>
@@ -1583,13 +1676,21 @@ function showAddPointsModal(studentId, studentName, currentPoints = 0) {
       <label>السبب (اختياري)</label>
       <input type="text" id="points-reason" placeholder="سبب إضافة النقاط">
     </div>
+    ${groupId ? `
+    <div class="form-group checkbox-group">
+      <label>
+        <input type="checkbox" id="apply-to-group">
+        تطبيق على الأسرة أيضاً
+      </label>
+    </div>
+    ` : ''}
   `, `
     <button class="btn btn-secondary btn-small" onclick="closeModal()">إلغاء</button>
-    <button class="btn btn-primary btn-small" onclick="addPoints(${studentId})">إضافة</button>
+    <button class="btn btn-primary btn-small" onclick="addPoints(${studentId}, ${groupId || 'null'})">إضافة</button>
   `);
 }
 
-function showSubtractPointsModal(studentId, studentName, currentPoints = 0) {
+function showSubtractPointsModal(studentId, studentName, currentPoints = 0, groupId = null) {
   if (currentPoints <= 0) {
     alert('لا يمكن خصم نقاط - الطالب ليس لديه نقاط');
     return;
@@ -1607,15 +1708,25 @@ function showSubtractPointsModal(studentId, studentName, currentPoints = 0) {
       <label>السبب (اختياري)</label>
       <input type="text" id="points-reason" placeholder="سبب خصم النقاط">
     </div>
+    ${groupId ? `
+    <div class="form-group checkbox-group">
+      <label>
+        <input type="checkbox" id="apply-to-group">
+        تطبيق على الأسرة أيضاً
+      </label>
+    </div>
+    ` : ''}
   `, `
     <button class="btn btn-secondary btn-small" onclick="closeModal()">إلغاء</button>
-    <button class="btn btn-danger btn-small" onclick="subtractPoints(${studentId})">خصم</button>
+    <button class="btn btn-danger btn-small" onclick="subtractPoints(${studentId}, ${groupId || 'null'})">خصم</button>
   `);
 }
 
-async function addPoints(studentId) {
+async function addPoints(studentId, groupId = null) {
   const points = parseInt(document.getElementById('points-amount').value);
   const reason = document.getElementById('points-reason').value;
+  const applyToGroupCheckbox = document.getElementById('apply-to-group');
+  const applyToGroup = applyToGroupCheckbox ? applyToGroupCheckbox.checked : false;
 
   try {
     const baseUrl = window.API_URL || window.location.origin + '/api';
@@ -1626,7 +1737,9 @@ async function addPoints(studentId) {
         points,
         action: 'add',
         reason: reason || 'إضافة نقاط يدوية',
-        reviewer_id: currentUser.id
+        reviewer_id: currentUser.id,
+        apply_to_group: applyToGroup,
+        group_id: groupId
       })
     });
 
@@ -1636,7 +1749,8 @@ async function addPoints(studentId) {
       closeModal();
       // تحديث النقاط والوقود في الصفحة بدون إعادة تحميل
       updateStudentPoints(studentId, data.total_points);
-      alert(`تم إضافة النقاط بنجاح! الوقود الجديد: ${data.fuel_emoji} ${data.fuel_type}`);
+      const groupMsg = applyToGroup ? ' (+ الأسرة)' : '';
+      alert(`تم إضافة النقاط بنجاح${groupMsg}! الوقود الجديد: ${data.fuel_emoji} ${data.fuel_type}`);
     } else {
       alert(data.message || 'حدث خطأ');
     }
@@ -1645,9 +1759,11 @@ async function addPoints(studentId) {
   }
 }
 
-async function subtractPoints(studentId) {
+async function subtractPoints(studentId, groupId = null) {
   const points = parseInt(document.getElementById('points-amount').value);
   const reason = document.getElementById('points-reason').value;
+  const applyToGroupCheckbox = document.getElementById('apply-to-group');
+  const applyToGroup = applyToGroupCheckbox ? applyToGroupCheckbox.checked : false;
 
   try {
     const baseUrl = window.API_URL || window.location.origin + '/api';
@@ -1658,7 +1774,9 @@ async function subtractPoints(studentId) {
         points,
         action: 'subtract',
         reason: reason || 'خصم نقاط يدوي',
-        reviewer_id: currentUser.id
+        reviewer_id: currentUser.id,
+        apply_to_group: applyToGroup,
+        group_id: groupId
       })
     });
 
@@ -2001,6 +2119,106 @@ async function submitNewRequest(e) {
   }
 }
 
+// ==================== My Group Page (Student) ====================
+async function renderMyGroupPage() {
+  try {
+    const settings = await SettingsAPI.getAll();
+    const hidePoints = settings.hide_points_from_all === 'true';
+
+    if (!currentUser.group_id) {
+      mainContent.innerHTML = `
+        <div class="page-header">
+          <h1><i class="fas fa-users"></i> أسرتي</h1>
+        </div>
+        <div class="card">
+          <div class="card-body">
+            <div class="empty-state">
+              <i class="fas fa-user-friends"></i>
+              <h3>لست منضماً لأي أسرة</h3>
+              <p>تواصل مع المشرف لإضافتك إلى أسرة</p>
+            </div>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    const group = await GroupsAPI.getDetails(currentUser.group_id);
+
+    mainContent.innerHTML = `
+      <div class="page-header">
+        <h1><i class="fas fa-users"></i> أسرتي - ${group.name}</h1>
+      </div>
+
+      ${hidePoints ? `
+        <div class="card hidden-points-notice">
+          <div class="card-body">
+            <div class="empty-state">
+              <i class="fas fa-eye-slash"></i>
+              <h3>النقاط مخفية حالياً</h3>
+              <p>سيتم الكشف عن النقاط قريباً. ترقبوا الإعلان!</p>
+            </div>
+          </div>
+        </div>
+      ` : `
+        <div class="card">
+          <div class="card-header">
+            <h2>خزانات الأسرة</h2>
+            <span>المجموع: ${group.total_points} نقطة</span>
+          </div>
+          <div class="card-body">
+            <div class="group-points-summary">
+              <div class="points-summary-item">
+                <span class="label">نقاط الأفراد:</span>
+                <span class="value">${group.members_points}</span>
+              </div>
+              <div class="points-summary-item">
+                <span class="label">نقاط الأسرة المباشرة:</span>
+                <span class="value">${group.direct_points}</span>
+              </div>
+              <div class="points-summary-item total">
+                <span class="label">الإجمالي:</span>
+                <span class="value">${group.total_points}</span>
+              </div>
+            </div>
+            <div class="fuel-tanks-container">
+              ${renderFuelTank('ديزل', group.fuel.diesel, 'diesel', '#8B7355')}
+              ${renderFuelTank('91', group.fuel.fuel91, 'fuel91', '#22c55e')}
+              ${renderFuelTank('95', group.fuel.fuel95, 'fuel95', '#ef4444')}
+              ${renderFuelTank('98', group.fuel.fuel98, 'fuel98', '#e5e5e5')}
+              ${renderFuelTank('إيثانول', group.fuel.ethanol, 'ethanol', '#3b82f6')}
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top: 20px;">
+          <div class="card-header">
+            <h2>أعضاء الأسرة (${group.members.length})</h2>
+          </div>
+          <div class="card-body">
+            ${group.members.length > 0 ? `
+              <div class="members-list">
+                ${group.members.map((m, i) => `
+                  <div class="member-item ${m.id === currentUser.id ? 'current-user' : ''}">
+                    <div class="member-rank">${i + 1}</div>
+                    <div class="member-info">
+                      <span class="member-name">${m.name} ${m.id === currentUser.id ? '(أنت)' : ''}</span>
+                      <span class="member-points">${m.total_points || 0} نقطة</span>
+                    </div>
+                    <div class="member-fuel">${getFuelEmoji(m.total_points || 0)}</div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<p>لا يوجد أعضاء في هذه الأسرة</p>'}
+          </div>
+        </div>
+      `}
+    `;
+  } catch (error) {
+    mainContent.innerHTML = `<div class="error-message">${error.message}</div>`;
+  }
+}
+
 // ==================== My Requests Page (Student) ====================
 async function renderMyRequestsPage() {
   try {
@@ -2202,6 +2420,154 @@ async function updateNotificationBadge() {
     });
   } catch (error) {
     console.error('Error updating badge:', error);
+  }
+}
+
+// ==================== Settings Page ====================
+async function renderSettingsPage() {
+  try {
+    const settings = await SettingsAPI.getAll();
+
+    mainContent.innerHTML = `
+      <div class="page-header">
+        <h1><i class="fas fa-cog"></i> الإعدادات</h1>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2><i class="fas fa-eye-slash"></i> إعدادات العرض</h2>
+        </div>
+        <div class="card-body">
+          <div class="settings-list">
+            <div class="setting-item ${settings.hide_points_from_all === 'true' ? 'setting-danger' : ''}">
+              <div class="setting-info">
+                <h3>🔒 إخفاء النقاط عن الجميع</h3>
+                <p>إخفاء جميع النقاط والخزانات عن الطلاب والأسر (للإعلان عن الفائز)</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-hide-points" ${settings.hide_points_from_all === 'true' ? 'checked' : ''} onchange="toggleHidePoints(this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 20px;">
+        <div class="card-header">
+          <h2>إعدادات النقاط</h2>
+        </div>
+        <div class="card-body">
+          <div class="settings-list">
+            <div class="setting-item">
+              <div class="setting-info">
+                <h3>الصب التلقائي للأسرة</h3>
+                <p>عند إضافة نقاط للفرد، تُضاف تلقائياً لأسرته</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-auto-sync" ${settings.auto_sync_to_group === 'true' ? 'checked' : ''} onchange="updateSetting('auto_sync_to_group', this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <h3>صب الطلبات المقبولة</h3>
+                <p>عند قبول طلب الطالب، تُضاف النقاط لأسرته</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-sync-requests" ${settings.sync_approved_requests === 'true' ? 'checked' : ''} onchange="updateSetting('sync_approved_requests', this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <h3>صب التعديلات اليدوية</h3>
+                <p>عند تعديل نقاط الطالب يدوياً، تتأثر نقاط أسرته</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-sync-manual" ${settings.sync_manual_adjustments === 'true' ? 'checked' : ''} onchange="updateSetting('sync_manual_adjustments', this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 20px;">
+        <div class="card-header">
+          <h2>سجل العمليات</h2>
+        </div>
+        <div class="card-body">
+          <button class="btn btn-primary" onclick="showPointsLog()">
+            <i class="fas fa-history"></i> عرض سجل العمليات
+          </button>
+        </div>
+      </div>
+    `;
+  } catch (error) {
+    mainContent.innerHTML = `<div class="error-message">${error.message}</div>`;
+  }
+}
+
+async function toggleHidePoints(hide) {
+  if (hide) {
+    if (!confirm('⚠️ هل أنت متأكد من إخفاء النقاط عن جميع الطلاب والأسر؟\n\nلن يتمكن أحد من رؤية النقاط حتى تقوم بإلغاء هذا الإعداد.')) {
+      document.getElementById('setting-hide-points').checked = false;
+      return;
+    }
+  }
+  await updateSetting('hide_points_from_all', hide);
+  renderSettingsPage();
+}
+
+async function updateSetting(key, value) {
+  try {
+    await SettingsAPI.update(key, value.toString());
+  } catch (error) {
+    alert('حدث خطأ في حفظ الإعداد');
+  }
+}
+
+async function showPointsLog() {
+  try {
+    const logs = await PointsLogAPI.getAll();
+
+    openModal('سجل العمليات', `
+      <div class="table-container" style="max-height: 400px; overflow-y: auto;">
+        ${logs.length > 0 ? `
+          <table>
+            <thead>
+              <tr>
+                <th>النوع</th>
+                <th>الهدف</th>
+                <th>النقاط</th>
+                <th>السبب</th>
+                <th>المنفذ</th>
+                <th>التاريخ</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${logs.map(log => `
+                <tr>
+                  <td>${log.operation_type === 'add' ? 'إضافة' : log.operation_type === 'subtract' ? 'خصم' : 'نسبة'}</td>
+                  <td>${log.target_type === 'group' ? 'أسرة' : 'فرد'} #${log.target_id}</td>
+                  <td>${log.percentage ? log.percentage + '%' : log.points}</td>
+                  <td>${log.reason || '-'}</td>
+                  <td>${log.performer_name || '-'}</td>
+                  <td>${new Date(log.created_at).toLocaleDateString('ar-SA')}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : '<p>لا توجد عمليات مسجلة</p>'}
+      </div>
+    `, `
+      <button class="btn btn-secondary btn-small" onclick="closeModal()">إغلاق</button>
+    `);
+  } catch (error) {
+    alert(error.message);
   }
 }
 
