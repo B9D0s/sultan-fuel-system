@@ -20,63 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
     mo.observe(document.body, { childList: true, subtree: true });
     markScrollableTables(document);
   } catch (e) { /* ignore */ }
-
-  // تحديث PWA: إظهار إشعار عند وجود إصدار جديد
-  try {
-    initServiceWorkerUpdates();
-  } catch (e) { /* ignore */ }
 });
-
-function showUpdateBanner(registration) {
-  if (!registration?.waiting) return;
-  let banner = document.getElementById('update-banner');
-  if (!banner) {
-    banner = document.createElement('div');
-    banner.id = 'update-banner';
-    banner.className = 'install-banner';
-    banner.innerHTML = `
-      <div class="install-content">
-        <span>يوجد تحديث للتطبيق</span>
-        <button id="update-btn" class="btn btn-primary btn-small">تحديث الآن</button>
-        <button id="update-close" class="install-close">&times;</button>
-      </div>
-    `;
-    document.body.appendChild(banner);
-  }
-  banner.style.display = 'block';
-  const btn = banner.querySelector('#update-btn');
-  const close = banner.querySelector('#update-close');
-  btn?.addEventListener('click', () => {
-    registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
-  }, { once: true });
-  close?.addEventListener('click', () => {
-    banner.style.display = 'none';
-  });
-}
-
-function initServiceWorkerUpdates() {
-  if (!('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.getRegistration().then((reg) => {
-    if (!reg) return;
-    // إذا كان هناك SW ينتظر بالفعل
-    if (reg.waiting && navigator.serviceWorker.controller) {
-      showUpdateBanner(reg);
-    }
-    reg.addEventListener('updatefound', () => {
-      const newWorker = reg.installing;
-      if (!newWorker) return;
-      newWorker.addEventListener('statechange', () => {
-        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-          showUpdateBanner(reg);
-        }
-      });
-    });
-  });
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    // بعد تفعيل الإصدار الجديد، أعد تحميل الصفحة مرة واحدة
-    window.location.reload();
-  });
-}
 
 // ==================== Login Tabs ====================
 function initLoginTabs() {
