@@ -118,7 +118,14 @@ const StudentsAPI = {
 
 // ==================== Requests API ====================
 const RequestsAPI = {
-  getAll: (status = '') => apiCall(`/requests${status ? `?status=${status}` : ''}`),
+  getAll: (status = '', cursor = '', limit = 50) => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (cursor) params.set('cursor', cursor);
+    params.set('limit', limit);
+    const qs = params.toString();
+    return apiCall(`/requests${qs ? '?' + qs : ''}`);
+  },
 
   getByStudent: (studentId) => apiCall(`/requests/student/${studentId}`),
 

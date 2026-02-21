@@ -1720,65 +1720,113 @@ async function togglePointsVisibility(studentId, hide, studentName) {
 }
 
 // ==================== Requests Page ====================
+let _requestsState = {
+  nextCursor: null,
+  totalCount: 0,
+  loadedCount: 0,
+  loading: false,
+  currentFilter: '',
+  rowOffset: 0
+};
+
+let _filterDebounceTimer = null;
+
 async function renderRequestsPage() {
+  _requestsState = { nextCursor: null, totalCount: 0, loadedCount: 0, loading: false, currentFilter: '', rowOffset: 0 };
+
+  mainContent.innerHTML = `
+    <div class="page-header">
+      <h1><i class="fas fa-clipboard-list"></i> إدارة الطلبات</h1>
+      <div class="header-actions">
+        <span id="requests-count-badge" style="font-size:0.85em;color:#64748b;margin-left:12px;"></span>
+        <select id="filter-status" onchange="filterRequests()">
+          <option value="">جميع الطلبات</option>
+          <option value="pending">قيد المراجعة</option>
+          <option value="approved">مقبول</option>
+          <option value="rejected">مرفوض</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الطالب</th>
+                <th>الأسرة</th>
+                <th>اللجنة</th>
+                <th>الوصف</th>
+                <th>النقاط</th>
+                <th>الحالة</th>
+                <th>الإجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="requests-table"></tbody>
+          </table>
+        </div>
+        <div id="requests-load-more" style="text-align:center;padding:16px;"></div>
+      </div>
+    </div>
+  `;
+
+  await loadMoreRequests();
+}
+
+async function loadMoreRequests() {
+  if (_requestsState.loading) return;
+  _requestsState.loading = true;
+
+  const loadMoreEl = document.getElementById('requests-load-more');
+  if (loadMoreEl) loadMoreEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التحميل...';
+
   try {
-    const requests = await RequestsAPI.getAll();
+    const result = await RequestsAPI.getAll(
+      _requestsState.currentFilter,
+      _requestsState.nextCursor,
+      50
+    );
 
-    mainContent.innerHTML = `
-      <div class="page-header">
-        <h1><i class="fas fa-clipboard-list"></i> إدارة الطلبات</h1>
-        <div class="header-actions">
-          <select id="filter-status" onchange="filterRequests()">
-            <option value="">جميع الطلبات</option>
-            <option value="pending">قيد المراجعة</option>
-            <option value="approved">مقبول</option>
-            <option value="rejected">مرفوض</option>
-          </select>
-        </div>
-      </div>
+    const { data, pagination } = result;
+    _requestsState.nextCursor = pagination.nextCursor;
+    _requestsState.totalCount = pagination.totalCount;
+    _requestsState.loadedCount += data.length;
 
-      <div class="card">
-        <div class="card-body">
-          ${requests.length > 0 ? `
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>الطالب</th>
-                    <th>الأسرة</th>
-                    <th>اللجنة</th>
-                    <th>الوصف</th>
-                    <th>النقاط</th>
-                    <th>الحالة</th>
-                    <th>الإجراءات</th>
-                  </tr>
-                </thead>
-                <tbody id="requests-table">
-                  ${renderRequestsRows(requests)}
-                </tbody>
-              </table>
-            </div>
-          ` : `
-            <div class="empty-state">
-              <i class="fas fa-clipboard-list"></i>
-              <h3>لا توجد طلبات</h3>
-            </div>
-          `}
-        </div>
-      </div>
-    `;
+    const tbody = document.getElementById('requests-table');
+    if (tbody) {
+      tbody.insertAdjacentHTML('beforeend', renderRequestsRows(data, _requestsState.rowOffset));
+      _requestsState.rowOffset += data.length;
+    }
+
+    const badge = document.getElementById('requests-count-badge');
+    if (badge) {
+      badge.textContent = `عرض ${_requestsState.loadedCount} من ${_requestsState.totalCount}`;
+    }
+
+    if (loadMoreEl) {
+      if (pagination.hasNextPage) {
+        loadMoreEl.innerHTML = `<button class="btn btn-secondary" onclick="loadMoreRequests()">تحميل المزيد</button>`;
+      } else if (_requestsState.loadedCount === 0) {
+        loadMoreEl.innerHTML = '<div class="empty-state"><i class="fas fa-clipboard-list"></i><h3>لا توجد طلبات</h3></div>';
+      } else {
+        loadMoreEl.innerHTML = '';
+      }
+    }
   } catch (error) {
-    mainContent.innerHTML = `<div class="error-message">${error.message}</div>`;
+    if (loadMoreEl) loadMoreEl.innerHTML = `<div class="error-message">${error.message}</div>`;
+  } finally {
+    _requestsState.loading = false;
   }
 }
 
-function renderRequestsRows(requests) {
+function renderRequestsRows(requests, offset = 0) {
   const fuelNames = { 1: 'ديزل', 2: '91', 3: '95', 4: '98', 5: 'إيثانول' };
 
   return requests.map((r, i) => `
     <tr>
-      <td>${i + 1}</td>
+      <td>${offset + i + 1}</td>
       <td>${r.student_name}</td>
       <td>${r.group_name || '-'}</td>
       <td>${r.committee}</td>
@@ -1806,13 +1854,17 @@ function renderRequestsRows(requests) {
 }
 
 async function filterRequests() {
-  const status = document.getElementById('filter-status').value;
-  try {
-    const requests = await RequestsAPI.getAll(status);
-    document.getElementById('requests-table').innerHTML = renderRequestsRows(requests);
-  } catch (error) {
-    alert(error.message);
-  }
+  if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
+  _filterDebounceTimer = setTimeout(async () => {
+    const status = document.getElementById('filter-status').value;
+    _requestsState.currentFilter = status;
+    _requestsState.nextCursor = null;
+    _requestsState.loadedCount = 0;
+    _requestsState.rowOffset = 0;
+    const tbody = document.getElementById('requests-table');
+    if (tbody) tbody.innerHTML = '';
+    await loadMoreRequests();
+  }, 300);
 }
 
 async function approveRequest(id) {

@@ -3,7 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId } = require('./database');
+const { initDatabase, getWeekNumber, generateCode, pointsToFuel, queryAll, queryOne, run, getLastInsertId, queryWithTimeout, queryOneWithTimeout } = require('./database');
 const PDFDocument = require('pdfkit');
 const { version: APP_VERSION } = require('./package.json');
 const {
@@ -25,9 +25,88 @@ const ARABIC_FONT_PATH = path.join(__dirname, 'fonts', 'Amiri-Regular.ttf');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ==================== In-Memory TTL Cache ====================
+const _cache = new Map();
+
+function cacheGet(key) {
+  const entry = _cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiry) {
+    _cache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function cacheSet(key, value, ttlMs) {
+  _cache.set(key, { value, expiry: Date.now() + ttlMs });
+}
+
+function cacheInvalidate(prefix) {
+  for (const key of _cache.keys()) {
+    if (key.startsWith(prefix)) _cache.delete(key);
+  }
+}
+
+// ==================== Rate Limiter ====================
+const _rateBuckets = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of _rateBuckets) {
+    if (now > rec.resetTime) _rateBuckets.delete(key);
+  }
+}, 60000);
+
+function rateLimiter(maxRequests, windowMs = 60000) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+
+    if (!_rateBuckets.has(ip)) {
+      _rateBuckets.set(ip, { count: 1, resetTime: now + windowMs });
+      return next();
+    }
+
+    const rec = _rateBuckets.get(ip);
+    if (now > rec.resetTime) {
+      rec.count = 1;
+      rec.resetTime = now + windowMs;
+      return next();
+    }
+
+    rec.count++;
+    if (rec.count > maxRequests) {
+      return res.status(429).json({
+        success: false,
+        message: 'عدد الطلبات كبير جداً، حاول بعد قليل'
+      });
+    }
+    next();
+  };
+}
+
+// ==================== Request Timeout Middleware ====================
+function requestTimeout(ms = 10000) {
+  return (req, res, next) => {
+    const timer = setTimeout(() => {
+      if (!res.headersSent) {
+        res.status(504).json({ success: false, message: 'انتهت مهلة الطلب' });
+      }
+    }, ms);
+
+    const cleanup = () => clearTimeout(timer);
+    res.on('finish', cleanup);
+    res.on('close', cleanup);
+    next();
+  };
+}
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/api', requestTimeout(10000));
+app.use('/api', rateLimiter(60));
 
 // تحويل إجمالي النقاط إلى خزانات (5→ethanol, 4→98, 3→95, 2→91, 1→diesel)
 function pointsToFuelTanks(totalPoints) {
@@ -45,7 +124,7 @@ function pointsToFuelTanks(totalPoints) {
 
 async function getSetting(key, defaultValue = null) {
   try {
-    const row = await queryOne(`SELECT value FROM app_settings WHERE key = '${String(key).replace(/'/g, "''")}'`);
+    const row = await queryOne('SELECT value FROM app_settings WHERE key = ?', [String(key)]);
     if (!row || row.value == null) return defaultValue;
     return row.value;
   } catch (e) {
@@ -62,13 +141,13 @@ async function getSettingBool(key, defaultValue = false) {
 }
 
 async function setSetting(key, value) {
-  const k = String(key).replace(/'/g, "''");
-  const v = value == null ? null : String(value).replace(/'/g, "''");
-  await run(`
-    INSERT INTO app_settings (key, value, updated_at)
-    VALUES ('${k}', ${v == null ? 'NULL' : `'${v}'`}, datetime('now'))
-    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')
-  `, false);
+  await run(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`,
+    [String(key), value == null ? null : String(value)],
+    false
+  );
 }
 
 // Service Worker header
@@ -111,8 +190,8 @@ app.get('/api/points-log', async (req, res) => {
       FROM points_log pl
       LEFT JOIN users u ON pl.performed_by = u.id
       ORDER BY pl.id DESC
-      LIMIT ${limit}
-    `);
+      LIMIT ?
+    `, [limit]);
     res.json({ success: true, rows });
   } catch (e) {
     res.status(400).json({ success: false, message: 'تعذر تحميل سجل العمليات' });
@@ -160,10 +239,11 @@ app.get('/api/public-config', (req, res) => {
 // تسجيل دخول الأدمن
 app.post('/api/auth/admin', async (req, res) => {
   const { username, password } = req.body;
-  const user = await queryOne(`
-    SELECT id, name, role FROM users
-    WHERE username = '${username}' AND password = '${password}' AND role = 'admin'
-  `);
+  const user = await queryOne(
+    `SELECT id, name, role FROM users
+     WHERE username = ? AND password = ? AND role = 'admin'`,
+    [username, password]
+  );
 
   if (user) {
     res.json({ success: true, user });
@@ -175,12 +255,13 @@ app.post('/api/auth/admin', async (req, res) => {
 // تسجيل دخول بالرمز (مشرف أو طالب)
 app.post('/api/auth/code', async (req, res) => {
   const { code } = req.body;
-  const user = await queryOne(`
-    SELECT u.id, u.name, u.role, u.group_id, g.name as group_name, COALESCE(u.points_hidden, 0) as points_hidden
-    FROM users u
-    LEFT JOIN groups g ON u.group_id = g.id
-    WHERE u.code = '${code}'
-  `);
+  const user = await queryOne(
+    `SELECT u.id, u.name, u.role, u.group_id, g.name as group_name, COALESCE(u.points_hidden, 0) as points_hidden
+     FROM users u
+     LEFT JOIN groups g ON u.group_id = g.id
+     WHERE u.code = ?`,
+    [code]
+  );
 
   if (user) {
     res.json({ success: true, user });
@@ -202,18 +283,20 @@ app.get('/api/groups', async (req, res) => {
   `);
 
   for (let group of groups) {
-    const membersPoints = await queryOne(`
-      SELECT COALESCE(SUM(
+    const membersPoints = await queryOne(
+      `SELECT COALESCE(SUM(
         COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
         COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)
       ), 0) as total
-      FROM users u WHERE u.group_id = ${group.id} AND u.role = 'student'
-    `);
-    const groupDirectPoints = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM group_points_adjustments
-      WHERE group_id = ${group.id}
-    `);
+      FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+      [group.id]
+    );
+    const groupDirectPoints = await queryOne(
+      `SELECT COALESCE(SUM(points), 0) as total
+       FROM group_points_adjustments
+       WHERE group_id = ?`,
+      [group.id]
+    );
     group.members_points = membersPoints?.total || 0;
     group.direct_points = groupDirectPoints?.total || 0;
     group.total_points = group.members_points + group.direct_points;
@@ -226,7 +309,7 @@ app.get('/api/groups', async (req, res) => {
 app.post('/api/groups', async (req, res) => {
   const { name } = req.body;
   try {
-    await run(`INSERT INTO groups (name) VALUES ('${name}')`);
+    await run('INSERT INTO groups (name) VALUES (?)', [name]);
     const id = await getLastInsertId();
     res.json({ success: true, id });
   } catch (error) {
@@ -238,7 +321,7 @@ app.post('/api/groups', async (req, res) => {
 app.put('/api/groups/:id', async (req, res) => {
   const { name } = req.body;
   try {
-    await run(`UPDATE groups SET name = '${name}' WHERE id = ${req.params.id}`);
+    await run('UPDATE groups SET name = ? WHERE id = ?', [name, req.params.id]);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في التعديل' });
@@ -248,8 +331,8 @@ app.put('/api/groups/:id', async (req, res) => {
 // حذف أسرة
 app.delete('/api/groups/:id', async (req, res) => {
   try {
-    await run(`UPDATE users SET group_id = NULL WHERE group_id = ${req.params.id}`);
-    await run(`DELETE FROM groups WHERE id = ${req.params.id}`);
+    await run('UPDATE users SET group_id = NULL WHERE group_id = ?', [req.params.id]);
+    await run('DELETE FROM groups WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
@@ -259,35 +342,40 @@ app.delete('/api/groups/:id', async (req, res) => {
 // جلب تفاصيل أسرة مع الخزانات
 app.get('/api/groups/:id/details', async (req, res) => {
   try {
-    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    const gid = req.params.id;
+    const group = await queryOne('SELECT * FROM groups WHERE id = ?', [gid]);
     if (!group) {
       return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
     }
 
-    const members = await queryAll(`
-      SELECT u.id, u.name,
+    const members = await queryAll(
+      `SELECT u.id, u.name,
         (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
          COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
-      FROM users u WHERE u.group_id = ${req.params.id} AND u.role = 'student'
-    `);
+       FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+      [gid]
+    );
 
-    const membersRequestsSum = await queryOne(`
-      SELECT COALESCE(SUM(r.points), 0) as total
-      FROM requests r
-      JOIN users u ON r.student_id = u.id
-      WHERE u.group_id = ${req.params.id} AND r.status = 'approved'
-    `);
-    const membersAdjustmentsSum = await queryOne(`
-      SELECT COALESCE(SUM(pa.points), 0) as total
-      FROM points_adjustments pa
-      JOIN users u ON pa.student_id = u.id
-      WHERE u.group_id = ${req.params.id}
-    `);
-    const directAdjustmentsSum = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM group_points_adjustments
-      WHERE group_id = ${req.params.id}
-    `);
+    const membersRequestsSum = await queryOne(
+      `SELECT COALESCE(SUM(r.points), 0) as total
+       FROM requests r
+       JOIN users u ON r.student_id = u.id
+       WHERE u.group_id = ? AND r.status = 'approved'`,
+      [gid]
+    );
+    const membersAdjustmentsSum = await queryOne(
+      `SELECT COALESCE(SUM(pa.points), 0) as total
+       FROM points_adjustments pa
+       JOIN users u ON pa.student_id = u.id
+       WHERE u.group_id = ?`,
+      [gid]
+    );
+    const directAdjustmentsSum = await queryOne(
+      `SELECT COALESCE(SUM(points), 0) as total
+       FROM group_points_adjustments
+       WHERE group_id = ?`,
+      [gid]
+    );
 
     const membersPointsTotal = (membersRequestsSum?.total || 0) + (membersAdjustmentsSum?.total || 0);
     const directTotal = directAdjustmentsSum?.total || 0;
@@ -328,22 +416,23 @@ app.post('/api/groups/:id/points', async (req, res) => {
       return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
     }
 
-    const group = await queryOne(`SELECT * FROM groups WHERE id = ${groupId}`);
+    const group = await queryOne('SELECT * FROM groups WHERE id = ?', [groupId]);
     if (!group) {
       return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
     }
 
     const actualPoints = action === 'subtract' ? -points : points;
-    const safeReason = (reason || (action === 'add' ? 'إضافة نقاط للأسرة' : 'خصم نقاط من الأسرة')).replace(/'/g, "''");
-    const adjBy = (reviewer_id != null && reviewer_id !== '') ? reviewer_id : 'NULL';
+    const reasonText = reason || (action === 'add' ? 'إضافة نقاط للأسرة' : 'خصم نقاط من الأسرة');
+    const adjBy = (reviewer_id != null && reviewer_id !== '') ? reviewer_id : null;
 
     if (apply_to_members) {
-      const members = await queryAll(`
-        SELECT u.id, u.name,
+      const members = await queryAll(
+        `SELECT u.id, u.name,
           (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
            COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
-        FROM users u WHERE u.group_id = ${groupId} AND u.role = 'student'
-      `);
+         FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+        [groupId]
+      );
       if (members.length === 0) {
         return res.status(400).json({ success: false, message: 'لا يوجد أعضاء في هذه الأسرة' });
       }
@@ -351,29 +440,28 @@ app.post('/api/groups/:id/points', async (req, res) => {
       const remainder = points % members.length;
 
       if (action === 'add') {
-        // إضافة مع "تطبيق على الأفراد أيضاً": نضيف للأسرة مباشرة + نوزع نفس النقاط على الأفراد أيضاً
-        await run(`
-          INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-          VALUES (${groupId}, ${points}, 1, '${safeReason} (إضافة الأسرة)', ${adjBy})
-        `);
+        await run(
+          `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+           VALUES (?, ?, 1, ?, ?)`,
+          [groupId, points, reasonText + ' (إضافة الأسرة)', adjBy]
+        );
 
         for (let i = 0; i < members.length; i++) {
           const member = members[i];
           const add = pointsPerMember + (i < remainder ? 1 : 0);
           if (add >= 1) {
-            await run(`
-              INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-              VALUES (${member.id}, ${add}, '${safeReason} (إضافة للأفراد)', ${adjBy})
-            `);
+            await run(
+              `INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+               VALUES (?, ?, ?, ?)`,
+              [member.id, add, reasonText + ' (إضافة للأفراد)', adjBy]
+            );
           }
         }
       } else {
-        // خصم مع "تطبيق على الأفراد": نخصم من نقاط الأسرة المباشرة (نفس العملية) + نخصم من الطلاب أيضاً
-        const groupDirect = await queryOne(`
-          SELECT COALESCE(SUM(points), 0) as total
-          FROM group_points_adjustments
-          WHERE group_id = ${groupId}
-        `);
+        const groupDirect = await queryOne(
+          'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
+          [groupId]
+        );
         const directTotal = Number(groupDirect?.total ?? 0);
         if (points > directTotal) {
           return res.status(400).json({
@@ -381,13 +469,12 @@ app.post('/api/groups/:id/points', async (req, res) => {
             message: `نقاط الأسرة المباشرة (${directTotal}) أقل من المطلوب خصمه (${points}).`
           });
         }
-        // خصم الأسرة (مباشر) دائماً عند apply_to_members
-        await run(`
-          INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-          VALUES (${groupId}, ${-points}, 1, '${safeReason} (خصم الأسرة)', ${adjBy})
-        `);
+        await run(
+          `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+           VALUES (?, ?, 1, ?, ?)`,
+          [groupId, -points, reasonText + ' (خصم الأسرة)', adjBy]
+        );
 
-        // خصم الطلاب: توزيع عادل + إعادة توزيع العجز على من يملك نقاطاً
         const intendedById = new Map();
         const deductedById = new Map();
         for (let i = 0; i < members.length; i++) {
@@ -396,7 +483,6 @@ app.post('/api/groups/:id/points', async (req, res) => {
           deductedById.set(members[i].id, 0);
         }
 
-        // pass 1: طبق الحصص الأساسية بحد أقصى نقاط الطالب
         let shortfall = 0;
         for (let i = 0; i < members.length; i++) {
           const m = members[i];
@@ -404,16 +490,16 @@ app.post('/api/groups/:id/points', async (req, res) => {
           const intended = intendedById.get(m.id) || 0;
           const deduct = Math.min(intended, memberPoints);
           if (deduct >= 1) {
-            await run(`
-              INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-              VALUES (${m.id}, ${-deduct}, '${safeReason} (خصم الأفراد)', ${adjBy})
-            `);
+            await run(
+              `INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+               VALUES (?, ?, ?, ?)`,
+              [m.id, -deduct, reasonText + ' (خصم الأفراد)', adjBy]
+            );
             deductedById.set(m.id, deduct);
           }
           shortfall += (intended - deduct);
         }
 
-        // pass 2: إعادة توزيع العجز على الطلاب القادرين (حتى نصل لنفس إجمالي الخصم إن أمكن)
         if (shortfall > 0) {
           for (let i = 0; i < members.length && shortfall > 0; i++) {
             const m = members[i];
@@ -422,10 +508,11 @@ app.post('/api/groups/:id/points', async (req, res) => {
             const remainingCapacity = Math.max(0, memberPoints - already);
             const extra = Math.min(remainingCapacity, shortfall);
             if (extra >= 1) {
-              await run(`
-                INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-                VALUES (${m.id}, ${-extra}, '${safeReason} (إكمال خصم الأفراد)', ${adjBy})
-              `);
+              await run(
+                `INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
+                 VALUES (?, ?, ?, ?)`,
+                [m.id, -extra, reasonText + ' (إكمال خصم الأفراد)', adjBy]
+              );
               deductedById.set(m.id, already + extra);
               shortfall -= extra;
             }
@@ -434,39 +521,39 @@ app.post('/api/groups/:id/points', async (req, res) => {
       }
     } else {
       if (action === 'subtract') {
-        const groupDirect = await queryOne(`SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ${groupId}`);
+        const groupDirect = await queryOne('SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?', [groupId]);
         const directTotal = groupDirect?.total || 0;
         if (points > directTotal) {
           return res.status(400).json({ success: false, message: `نقاط الأسرة المباشرة (${directTotal}) أقل من المطلوب خصمه (${points}). استخدم "خصم من الأفراد أيضاً" لخصم من نقاط الطلاب.` });
         }
       }
-      await run(`
-        INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-        VALUES (${groupId}, ${actualPoints}, 0, '${safeReason}', ${adjBy})
-      `);
+      await run(
+        `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+         VALUES (?, ?, 0, ?, ?)`,
+        [groupId, actualPoints, reasonText, adjBy]
+      );
     }
 
     try {
-      await run(`
-        INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, reason, performed_by)
-        VALUES ('${action}', 'group', ${groupId}, ${groupId}, ${points}, '${safeReason}', ${adjBy})
-      `);
+      await run(
+        `INSERT INTO points_log (operation_type, target_type, target_id, group_id, points, reason, performed_by)
+         VALUES (?, 'group', ?, ?, ?, ?, ?)`,
+        [action, groupId, groupId, points, reasonText, adjBy]
+      );
     } catch (e) { /* points_log اختياري */ }
 
     // إشعارات داخل التطبيق لأعضاء الأسرة
-    const members = await queryAll(`
-      SELECT id FROM users WHERE group_id = ${groupId} AND role = 'student'
-    `);
+    const allMembers = await queryAll('SELECT id FROM users WHERE group_id = ? AND role = ?', [groupId, 'student']);
     const notifTitle = action === 'add' ? 'تم إضافة نقاط للأسرة 🎉' : 'تم خصم نقاط من الأسرة ⚠️';
     const notifMessage = action === 'add'
-      ? `حصلت أسرتك "${(group.name || '').replace(/'/g, "''")}" على ${points} نقاط${apply_to_members ? ' (موزعة على الأفراد)' : ''}`
-      : `تم خصم ${points} نقاط من أسرتك "${(group.name || '').replace(/'/g, "''")}"${apply_to_members ? ' (من الأفراد)' : ''}`;
-    for (const m of members) {
+      ? `حصلت أسرتك "${group.name || ''}" على ${points} نقاط${apply_to_members ? ' (موزعة على الأفراد)' : ''}`
+      : `تم خصم ${points} نقاط من أسرتك "${group.name || ''}"${apply_to_members ? ' (من الأفراد)' : ''}`;
+    for (const m of allMembers) {
       try {
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${m.id}, '${notifTitle}', '${notifMessage}')
-        `);
+        await run(
+          'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+          [m.id, notifTitle, notifMessage]
+        );
       } catch (e) { /* تجاهل */ }
     }
 
@@ -480,6 +567,8 @@ app.post('/api/groups/:id/points', async (req, res) => {
 // زيادة أو خصم مئوي للأسرة
 app.post('/api/groups/:id/percentage', async (req, res) => {
   const { percentage, apply_to_members, reason, reviewer_id, action } = req.body;
+  const gid = req.params.id;
+  const adjBy = reviewer_id || null;
 
   if (!percentage || percentage <= 0) {
     return res.status(400).json({ success: false, message: 'يجب تحديد نسبة صحيحة' });
@@ -488,85 +577,84 @@ app.post('/api/groups/:id/percentage', async (req, res) => {
   const isSubtract = action === 'subtract';
 
   try {
-    const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.id}`);
+    const group = await queryOne('SELECT * FROM groups WHERE id = ?', [gid]);
     if (!group) {
       return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
     }
 
-    const safeReason = (reason || `${isSubtract ? 'خصم' : 'زيادة'} ${percentage}%`).replace(/'/g, "''");
+    const reasonText = reason || `${isSubtract ? 'خصم' : 'زيادة'} ${percentage}%`;
 
-    const members = await queryAll(`
-      SELECT u.id, u.name,
+    const members = await queryAll(
+      `SELECT u.id, u.name,
         (COALESCE((SELECT SUM(points) FROM requests WHERE student_id = u.id AND status = 'approved'), 0) +
          COALESCE((SELECT SUM(points) FROM points_adjustments WHERE student_id = u.id), 0)) as total_points
-      FROM users u WHERE u.group_id = ${req.params.id} AND u.role = 'student'
-    `);
-    const membersTotal = members.reduce((sum, m) => sum + (Number(m.total_points) || 0), 0);
-    const directPoints = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM group_points_adjustments
-      WHERE group_id = ${req.params.id}
-    `);
+       FROM users u WHERE u.group_id = ? AND u.role = 'student'`,
+      [gid]
+    );
+    const directPoints = await queryOne(
+      'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
+      [gid]
+    );
     const directTotal = Number(directPoints?.total ?? 0);
-    // النسبة تُحسب للأسرة من نقاطها المباشرة فقط، وللطلاب من نقاط كل طالب
     const directDelta = Math.floor((directTotal * percentage) / 100);
 
     if (isSubtract) {
       if (apply_to_members) {
-        // خصم من نقاط الأسرة المباشرة أيضاً (بالإضافة لخصم كل طالب من نقاطه)
         const pointsToDeduct = Math.min(directDelta, directTotal);
         if (pointsToDeduct >= 1) {
-          await run(`
-            INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
-            VALUES (${req.params.id}, ${-pointsToDeduct}, ${percentage}, 1, 1, '${safeReason} (خصم الأسرة)', ${reviewer_id || 'NULL'})
-          `);
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, ?, 1, 1, ?, ?)`,
+            [gid, -pointsToDeduct, percentage, reasonText + ' (خصم الأسرة)', adjBy]
+          );
         }
 
         for (const member of members) {
           const change = Math.floor((member.total_points * percentage) / 100);
           if (change >= 1 && member.total_points >= change) {
-            await run(`
-              INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-              VALUES (${member.id}, ${-change}, '${safeReason}', ${reviewer_id || 'NULL'})
-            `);
+            await run(
+              'INSERT INTO points_adjustments (student_id, points, reason, adjusted_by) VALUES (?, ?, ?, ?)',
+              [member.id, -change, reasonText, adjBy]
+            );
           }
         }
       } else {
-        // خصم بدون تطبيق على الأفراد = النسبة من نقاط الأسرة المباشرة فقط (لا نستخدم groupTotal هنا)
         const pointsToDeduct = Math.min(directDelta, directTotal);
         if (pointsToDeduct >= 1) {
-          await run(`
-            INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
-            VALUES (${req.params.id}, ${-pointsToDeduct}, ${percentage}, 1, 0, '${safeReason}', ${reviewer_id || 'NULL'})
-          `);
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, ?, 1, 0, ?, ?)`,
+            [gid, -pointsToDeduct, percentage, reasonText, adjBy]
+          );
         }
       }
     } else {
-      // زيادة: نضيف النسبة على نقاط الأسرة المباشرة، وإذا apply_to_members نضيف أيضاً على نقاط كل طالب
       if (directDelta >= 1) {
-        await run(`
-          INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
-          VALUES (${req.params.id}, ${directDelta}, ${percentage}, 1, ${apply_to_members ? 1 : 0}, '${safeReason}', ${reviewer_id || 'NULL'})
-        `);
+        await run(
+          `INSERT INTO group_points_adjustments (group_id, points, percentage, is_percentage, apply_to_members, reason, adjusted_by)
+           VALUES (?, ?, ?, 1, ?, ?, ?)`,
+          [gid, directDelta, percentage, apply_to_members ? 1 : 0, reasonText, adjBy]
+        );
       }
       if (apply_to_members) {
         for (const member of members) {
           const change = Math.floor((member.total_points * percentage) / 100);
           if (change >= 1) {
-            await run(`
-              INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-              VALUES (${member.id}, ${change}, '${safeReason}', ${reviewer_id || 'NULL'})
-            `);
+            await run(
+              'INSERT INTO points_adjustments (student_id, points, reason, adjusted_by) VALUES (?, ?, ?, ?)',
+              [member.id, change, reasonText, adjBy]
+            );
           }
         }
       }
     }
 
     try {
-      await run(`
-        INSERT INTO points_log (operation_type, target_type, target_id, group_id, percentage, reason, performed_by)
-        VALUES ('percentage_${action}', 'group', ${req.params.id}, ${req.params.id}, ${percentage}, '${safeReason}', ${reviewer_id || 'NULL'})
-      `);
+      await run(
+        `INSERT INTO points_log (operation_type, target_type, target_id, group_id, percentage, reason, performed_by)
+         VALUES (?, 'group', ?, ?, ?, ?, ?)`,
+        ['percentage_' + action, gid, gid, percentage, reasonText, adjBy]
+      );
     } catch (e) { /* ignore */ }
 
     res.json({ success: true, message: action === 'subtract' ? 'تم تطبيق الخصم المئوي بنجاح' : 'تم تطبيق الزيادة المئوية بنجاح' });
@@ -590,7 +678,7 @@ app.post('/api/supervisors', async (req, res) => {
   const { name } = req.body;
   const code = await generateCode();
   try {
-    await run(`INSERT INTO users (name, code, role) VALUES ('${name}', '${code}', 'supervisor')`);
+    await run('INSERT INTO users (name, code, role) VALUES (?, ?, ?)', [name, code, 'supervisor']);
     const id = await getLastInsertId();
     res.json({ success: true, id, code });
   } catch (error) {
@@ -601,7 +689,7 @@ app.post('/api/supervisors', async (req, res) => {
 // حذف مشرف
 app.delete('/api/supervisors/:id', async (req, res) => {
   try {
-    await run(`DELETE FROM users WHERE id = ${req.params.id} AND role = 'supervisor'`);
+    await run('DELETE FROM users WHERE id = ? AND role = ?', [req.params.id, 'supervisor']);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
@@ -627,29 +715,24 @@ app.post('/api/students', async (req, res) => {
   const { name, group_id } = req.body;
   const code = await generateCode();
   try {
-    const groupVal = group_id ? group_id : 'NULL';
-    await run(`INSERT INTO users (name, code, role, group_id) VALUES ('${name}', '${code}', 'student', ${groupVal})`);
+    await run('INSERT INTO users (name, code, role, group_id) VALUES (?, ?, ?, ?)', [name, code, 'student', group_id || null]);
     const id = await getLastInsertId();
 
-    // جلب اسم الأسرة إذا وجدت
     let groupName = null;
     if (group_id) {
-      const group = await queryOne(`SELECT name FROM groups WHERE id = ${group_id}`);
+      const group = await queryOne('SELECT name FROM groups WHERE id = ?', [group_id]);
       groupName = group ? group.name : null;
     }
 
-    // إرسال إشعار للطالب الجديد
     await notifyNewStudent(id, name, code);
 
-    // إنشاء إشعار ترحيبي في قاعدة البيانات
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${id}, 'مرحباً بك في نظام سلطان! 🎉', 'أهلاً ${name}! رمز دخولك هو: ${code}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [id, 'مرحباً بك في نظام سلطان! 🎉', `أهلاً ${name}! رمز دخولك هو: ${code}`]
+    );
 
-    // إشعار المشرفين والأدمن
-    const supervisors = await queryAll(`SELECT id FROM users WHERE role = 'supervisor'`);
-    const admins = await queryAll(`SELECT id FROM users WHERE role = 'admin'`);
+    const supervisors = await queryAll("SELECT id FROM users WHERE role = 'supervisor'");
+    const admins = await queryAll("SELECT id FROM users WHERE role = 'admin'");
     await notifyNewStudentToSupervisors(name, groupName, supervisors.map(s => s.id), admins.map(a => a.id));
 
     res.json({ success: true, id, code });
@@ -661,38 +744,33 @@ app.post('/api/students', async (req, res) => {
 // تعديل طالب
 app.put('/api/students/:id', async (req, res) => {
   const { name, group_id } = req.body;
+  const sid = req.params.id;
   try {
-    // جلب بيانات الطالب الحالية
-    const currentStudent = await queryOne(`
-      SELECT u.group_id, g.name as group_name
-      FROM users u
-      LEFT JOIN groups g ON u.group_id = g.id
-      WHERE u.id = ${req.params.id}
-    `);
+    const currentStudent = await queryOne(
+      `SELECT u.group_id, g.name as group_name FROM users u LEFT JOIN groups g ON u.group_id = g.id WHERE u.id = ?`,
+      [sid]
+    );
 
-    const groupVal = group_id ? group_id : 'NULL';
-    await run(`UPDATE users SET name = '${name}', group_id = ${groupVal} WHERE id = ${req.params.id}`);
+    await run('UPDATE users SET name = ?, group_id = ? WHERE id = ?', [name, group_id || null, sid]);
 
-    // إذا تغيرت الأسرة، أرسل إشعار
     if (currentStudent && String(currentStudent.group_id) !== String(group_id)) {
       let newGroupName = null;
       if (group_id) {
-        const newGroup = await queryOne(`SELECT name FROM groups WHERE id = ${group_id}`);
+        const newGroup = await queryOne('SELECT name FROM groups WHERE id = ?', [group_id]);
         newGroupName = newGroup ? newGroup.name : null;
       }
 
       if (newGroupName) {
-        await notifyGroupChanged(req.params.id, newGroupName, currentStudent.group_name);
+        await notifyGroupChanged(sid, newGroupName, currentStudent.group_name);
 
-        // إنشاء إشعار في قاعدة البيانات
         const message = currentStudent.group_name
           ? `تم نقلك من أسرة "${currentStudent.group_name}" إلى أسرة "${newGroupName}"`
           : `تم إضافتك إلى أسرة "${newGroupName}"`;
 
-        await run(`
-          INSERT INTO notifications (user_id, title, message)
-          VALUES (${req.params.id}, 'تغيير الأسرة 👥', '${message.replace(/'/g, "''")}')
-        `);
+        await run(
+          'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+          [sid, 'تغيير الأسرة 👥', message]
+        );
       }
     }
 
@@ -705,7 +783,7 @@ app.put('/api/students/:id', async (req, res) => {
 // حذف طالب
 app.delete('/api/students/:id', async (req, res) => {
   try {
-    await run(`DELETE FROM users WHERE id = ${req.params.id} AND role = 'student'`);
+    await run('DELETE FROM users WHERE id = ? AND role = ?', [req.params.id, 'student']);
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ success: false, message: 'حدث خطأ في الحذف' });
@@ -715,14 +793,13 @@ app.delete('/api/students/:id', async (req, res) => {
 // تعديل نقاط طالب (إضافة أو خصم)
 app.post('/api/students/:id/points', async (req, res) => {
   const { points, action, reason, reviewer_id } = req.body;
-  // action: 'add' للإضافة أو 'subtract' للخصم
+  const sid = req.params.id;
 
   if (!points || points < 1) {
     return res.status(400).json({ success: false, message: 'يجب تحديد عدد النقاط' });
   }
 
   try {
-    // التأكد من وجود جدول التعديلات اليدوية
     await run(`
       CREATE TABLE IF NOT EXISTS points_adjustments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -734,29 +811,24 @@ app.post('/api/students/:id/points', async (req, res) => {
       )
     `, false);
 
-    // جلب النقاط الحالية (من الطلبات + التعديلات اليدوية)
-    const requestsPoints = await queryOne(`
-      SELECT COALESCE(SUM(points), 0) as total
-      FROM requests
-      WHERE student_id = ${req.params.id} AND status = 'approved'
-    `);
+    const requestsPoints = await queryOne(
+      "SELECT COALESCE(SUM(points), 0) as total FROM requests WHERE student_id = ? AND status = 'approved'",
+      [sid]
+    );
 
     let adjustmentsTotal = 0;
     try {
-      const adjustmentsPoints = await queryOne(`
-        SELECT COALESCE(SUM(points), 0) as total
-        FROM points_adjustments
-        WHERE student_id = ${req.params.id}
-      `);
+      const adjustmentsPoints = await queryOne(
+        'SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments WHERE student_id = ?',
+        [sid]
+      );
       adjustmentsTotal = adjustmentsPoints?.total || 0;
     } catch (e) {
-      // الجدول قد لا يكون موجوداً بعد
       adjustmentsTotal = 0;
     }
 
     const currentPoints = (requestsPoints?.total || 0) + adjustmentsTotal;
 
-    // التحقق من إمكانية الخصم
     if (action === 'subtract' && currentPoints < points) {
       return res.status(400).json({
         success: false,
@@ -765,59 +837,50 @@ app.post('/api/students/:id/points', async (req, res) => {
     }
 
     const actualPoints = action === 'subtract' ? -points : points;
-    const safeReason = (reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي')).replace(/'/g, "''");
+    const reasonText = reason || (action === 'add' ? 'إضافة نقاط يدوية' : 'خصم نقاط يدوي');
 
-    // إنشاء سجل تعديل النقاط في الجدول الجديد
-    await run(`
-      INSERT INTO points_adjustments (student_id, points, reason, adjusted_by)
-      VALUES (${req.params.id}, ${actualPoints}, '${safeReason}', ${reviewer_id})
-    `);
+    await run(
+      'INSERT INTO points_adjustments (student_id, points, reason, adjusted_by) VALUES (?, ?, ?, ?)',
+      [sid, actualPoints, reasonText, reviewer_id]
+    );
 
-    // إعدادات: صب التعديلات اليدوية/الإضافة التلقائية للأسرة
     try {
-      const student = await queryOne(`SELECT group_id FROM users WHERE id = ${req.params.id}`);
+      const student = await queryOne('SELECT group_id FROM users WHERE id = ?', [sid]);
       const groupId = student?.group_id;
       if (groupId) {
         const pourManual = await getSettingBool('pour_manual_adjustments_to_group', false);
         const pourAddOnly = await getSettingBool('auto_pour_add_points_to_group', false);
-        const shouldPour =
-          pourManual
-            ? true
-            : (pourAddOnly && action === 'add');
+        const shouldPour = pourManual ? true : (pourAddOnly && action === 'add');
 
         if (shouldPour) {
-          await run(`
-            INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-            VALUES (${groupId}, ${actualPoints}, 0, '${safeReason} (صب تلقائي للأسرة)', ${reviewer_id})
-          `);
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, 0, ?, ?)`,
+            [groupId, actualPoints, reasonText + ' (صب تلقائي للأسرة)', reviewer_id]
+          );
         }
       }
     } catch (e) { /* ignore */ }
 
-    // حساب النقاط الجديدة
     const newPoints = currentPoints + actualPoints;
-
-    // تحديد نوع الوقود بناءً على النقاط (الحد الأقصى 5)
     const fuelLevel = Math.min(Math.max(newPoints, 0), 5);
     const fuelType = fuelLevel > 0 ? pointsToFuel(fuelLevel) : { name: 'لا يوجد', emoji: '⚫' };
 
-    // إرسال إشعار للطالب
     if (action === 'add') {
-      await notifyPointsAdded(req.params.id, points, newPoints, fuelType.name, fuelType.emoji, reason);
+      await notifyPointsAdded(sid, points, newPoints, fuelType.name, fuelType.emoji, reason);
     } else {
-      await notifyPointsSubtracted(req.params.id, points, newPoints, fuelType.name, fuelType.emoji, reason);
+      await notifyPointsSubtracted(sid, points, newPoints, fuelType.name, fuelType.emoji, reason);
     }
 
-    // إنشاء إشعار في قاعدة البيانات أيضاً
     const notifTitle = action === 'add' ? 'تم إضافة نقاط ➕' : 'تم خصم نقاط ➖';
     const notifMessage = action === 'add'
       ? `حصلت على ${points} نقاط! وقودك الآن: ${fuelType.emoji} ${fuelType.name}`
       : `تم خصم ${points} نقاط. وقودك الآن: ${fuelType.emoji} ${fuelType.name}`;
 
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${req.params.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [sid, notifTitle, notifMessage]
+    );
 
     res.json({
       success: true,
@@ -834,27 +897,22 @@ app.post('/api/students/:id/points', async (req, res) => {
 // تبديل حالة إخفاء النقاط للطالب
 app.post('/api/students/:id/toggle-points-visibility', async (req, res) => {
   const { hidden, reason } = req.body;
+  const sid = req.params.id;
 
   try {
-    // تحديث حالة إخفاء النقاط
-    await run(`UPDATE users SET points_hidden = ${hidden ? 1 : 0} WHERE id = ${req.params.id}`);
+    await run('UPDATE users SET points_hidden = ? WHERE id = ?', [hidden ? 1 : 0, sid]);
 
-    // جلب اسم الطالب
-    const student = await queryOne(`SELECT name FROM users WHERE id = ${req.params.id}`);
+    await notifyPointsVisibilityChanged(sid, hidden, reason);
 
-    // إرسال إشعار للطالب
-    await notifyPointsVisibilityChanged(req.params.id, hidden, reason);
-
-    // إنشاء إشعار في قاعدة البيانات
     const notifTitle = hidden ? 'تم إخفاء نقاطك 🚫' : 'تم إظهار نقاطك ✅';
     const notifMessage = hidden
       ? `تم منعك من رؤية نقاطك مؤقتاً${reason ? '. السبب: ' + reason : ''}`
       : 'يمكنك الآن رؤية نقاطك مرة أخرى';
 
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${req.params.id}, '${notifTitle}', '${notifMessage.replace(/'/g, "''")}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [sid, notifTitle, notifMessage]
+    );
 
     res.json({ success: true, points_hidden: hidden });
   } catch (error) {
@@ -867,46 +925,112 @@ app.post('/api/students/:id/toggle-points-visibility', async (req, res) => {
 
 // جلب طلبات طالب معين
 app.get('/api/requests/student/:studentId', async (req, res) => {
-  const requests = await queryAll(`
-    SELECT r.*, u.name as reviewer_name
-    FROM requests r
-    LEFT JOIN users u ON r.reviewed_by = u.id
-    WHERE r.student_id = ${req.params.studentId}
-    ORDER BY r.created_at DESC
-  `);
+  const requests = await queryAll(
+    `SELECT r.*, u.name as reviewer_name
+     FROM requests r
+     LEFT JOIN users u ON r.reviewed_by = u.id
+     WHERE r.student_id = ?
+     ORDER BY r.created_at DESC`,
+    [req.params.studentId]
+  );
   res.json(requests);
 });
 
-// جلب كل الطلبات (للمشرف)
+// جلب كل الطلبات (للمشرف) - مع cursor-based pagination
 app.get('/api/requests', async (req, res) => {
-  const { status } = req.query;
-  let query = `
-    SELECT r.*, u.name as student_name, g.name as group_name, rev.name as reviewer_name
-    FROM requests r
-    JOIN users u ON r.student_id = u.id
-    LEFT JOIN groups g ON u.group_id = g.id
-    LEFT JOIN users rev ON r.reviewed_by = rev.id
-  `;
+  try {
+    const { status, cursor, limit: limitParam } = req.query;
+    const limit = Math.min(Math.max(parseInt(limitParam) || 50, 1), 100);
 
-  if (status) {
-    query += ` WHERE r.status = '${status}'`;
+    let cursorId = null;
+    if (cursor) {
+      try {
+        cursorId = JSON.parse(Buffer.from(cursor, 'base64').toString()).id;
+      } catch (e) {
+        return res.status(400).json({ success: false, message: 'Invalid cursor' });
+      }
+    }
+
+    const conditions = [];
+    const params = [];
+
+    if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+      conditions.push('r.status = ?');
+      params.push(status);
+    }
+
+    if (cursorId != null) {
+      conditions.push('r.id < ?');
+      params.push(cursorId);
+    }
+
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    params.push(limit + 1);
+
+    const rows = await queryWithTimeout(
+      `SELECT r.*, u.name as student_name, g.name as group_name, rev.name as reviewer_name
+       FROM requests r
+       JOIN users u ON r.student_id = u.id
+       LEFT JOIN groups g ON u.group_id = g.id
+       LEFT JOIN users rev ON r.reviewed_by = rev.id
+       ${whereClause}
+       ORDER BY r.id DESC
+       LIMIT ?`,
+      params
+    );
+
+    const hasNextPage = rows.length > limit;
+    const data = hasNextPage ? rows.slice(0, limit) : rows;
+
+    let nextCursor = null;
+    if (hasNextPage && data.length > 0) {
+      nextCursor = Buffer.from(JSON.stringify({ id: data[data.length - 1].id })).toString('base64');
+    }
+
+    // Cached count query
+    const countCacheKey = `requests_count_${status || 'all'}`;
+    let totalCount = cacheGet(countCacheKey);
+    if (totalCount === undefined) {
+      const countParams = [];
+      let countWhere = '';
+      if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+        countWhere = 'WHERE status = ?';
+        countParams.push(status);
+      }
+      const countResult = await queryOne(`SELECT COUNT(*) as count FROM requests ${countWhere}`, countParams);
+      totalCount = countResult ? countResult.count : 0;
+      cacheSet(countCacheKey, totalCount, 30000);
+    }
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        limit,
+        hasNextPage,
+        nextCursor,
+        totalCount
+      }
+    });
+  } catch (error) {
+    if (error.message === 'DATABASE_TIMEOUT') {
+      return res.status(504).json({ success: false, message: 'انتهت مهلة قاعدة البيانات' });
+    }
+    console.error('GET /api/requests error:', error);
+    res.status(500).json({ success: false, message: 'خطأ في جلب الطلبات' });
   }
-  query += ' ORDER BY r.created_at DESC';
-
-  const requests = await queryAll(query);
-  res.json(requests);
 });
 
 // إنشاء طلب جديد
 app.post('/api/requests', async (req, res) => {
   const { student_id, committee, description, points } = req.body;
 
-  // التحقق من الحد الأسبوعي
   const weekNumber = getWeekNumber();
-  const currentWeekRequests = await queryOne(`
-    SELECT COUNT(*) as count FROM requests
-    WHERE student_id = ${student_id} AND week_number = ${weekNumber}
-  `);
+  const currentWeekRequests = await queryOne(
+    'SELECT COUNT(*) as count FROM requests WHERE student_id = ? AND week_number = ?',
+    [student_id, weekNumber]
+  );
 
   if (currentWeekRequests && currentWeekRequests.count >= 20) {
     return res.status(400).json({
@@ -916,33 +1040,29 @@ app.post('/api/requests', async (req, res) => {
   }
 
   try {
-    const safeDesc = description.replace(/'/g, "''");
-    await run(`
-      INSERT INTO requests (student_id, committee, description, points, week_number)
-      VALUES (${student_id}, '${committee}', '${safeDesc}', ${points}, ${weekNumber})
-    `);
+    await run(
+      'INSERT INTO requests (student_id, committee, description, points, week_number) VALUES (?, ?, ?, ?, ?)',
+      [student_id, committee, description, points, weekNumber]
+    );
     const id = await getLastInsertId();
 
-    // إرسال إشعار للمشرفين والأدمن بوجود طلب جديد
-    const student = await queryOne(`SELECT name FROM users WHERE id = ${student_id}`);
+    const student = await queryOne('SELECT name FROM users WHERE id = ?', [student_id]);
 
-    // جلب معرفات المشرفين والأدمن
-    const supervisors = await queryAll(`SELECT id FROM users WHERE role = 'supervisor'`);
-    const admins = await queryAll(`SELECT id FROM users WHERE role = 'admin'`);
-    const supervisorIds = supervisors.map(s => s.id);
-    const adminIds = admins.map(a => a.id);
+    const supervisors = await queryAll("SELECT id FROM users WHERE role = 'supervisor'");
+    const admins = await queryAll("SELECT id FROM users WHERE role = 'admin'");
 
-    await notifyNewRequest(student ? student.name : 'طالب', supervisorIds, adminIds);
+    await notifyNewRequest(student ? student.name : 'طالب', supervisors.map(s => s.id), admins.map(a => a.id));
 
-    // التحقق إذا وصل للحد الأسبوعي بعد هذا الطلب
     const newCount = (currentWeekRequests?.count || 0) + 1;
     if (newCount >= 20) {
       await notifyWeeklyLimitReached(student_id);
-      await run(`
-        INSERT INTO notifications (user_id, title, message)
-        VALUES (${student_id}, 'وصلت للحد الأسبوعي ⚠️', 'لقد وصلت للحد الأقصى من الطلبات هذا الأسبوع (20 طلب). انتظر الأسبوع القادم!')
-      `);
+      await run(
+        'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+        [student_id, 'وصلت للحد الأسبوعي ⚠️', 'لقد وصلت للحد الأقصى من الطلبات هذا الأسبوع (20 طلب). انتظر الأسبوع القادم!']
+      );
     }
+
+    cacheInvalidate('requests_');
 
     res.json({ success: true, id });
   } catch (error) {
@@ -953,37 +1073,37 @@ app.post('/api/requests', async (req, res) => {
 // قبول طلب
 app.post('/api/requests/:id/approve', async (req, res) => {
   const { reviewer_id } = req.body;
+  const rid = req.params.id;
   try {
-    await run(`
-      UPDATE requests
-      SET status = 'approved', reviewed_by = ${reviewer_id}, reviewed_at = datetime('now')
-      WHERE id = ${req.params.id}
-    `);
+    await run(
+      "UPDATE requests SET status = 'approved', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?",
+      [reviewer_id, rid]
+    );
 
-    // إنشاء إشعار للطالب
-    const request = await queryOne(`SELECT student_id, points FROM requests WHERE id = ${req.params.id}`);
+    const request = await queryOne('SELECT student_id, points FROM requests WHERE id = ?', [rid]);
     const fuel = pointsToFuel(request.points);
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${request.student_id}, 'تم قبول طلبك ✅', 'حصلت على 1 لتر ${fuel.name} ${fuel.emoji}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [request.student_id, 'تم قبول طلبك ✅', `حصلت على 1 لتر ${fuel.name} ${fuel.emoji}`]
+    );
 
-    // إعدادات: صب الطلبات المقبولة لنقاط الأسرة المباشرة
     try {
       const pourApproved = await getSettingBool('pour_approved_requests_to_group', false);
       if (pourApproved) {
-        const st = await queryOne(`SELECT group_id FROM users WHERE id = ${request.student_id}`);
+        const st = await queryOne('SELECT group_id FROM users WHERE id = ?', [request.student_id]);
         if (st?.group_id) {
-          await run(`
-            INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
-            VALUES (${st.group_id}, ${request.points}, 0, 'صب طلب مقبول (تلقائي)', ${reviewer_id})
-          `);
+          await run(
+            `INSERT INTO group_points_adjustments (group_id, points, apply_to_members, reason, adjusted_by)
+             VALUES (?, ?, 0, ?, ?)`,
+            [st.group_id, request.points, 'صب طلب مقبول (تلقائي)', reviewer_id]
+          );
         }
       }
     } catch (e) { /* ignore */ }
 
-    // إرسال Push Notification
     await notifyRequestApproved(request.student_id, fuel.name, fuel.emoji);
+
+    cacheInvalidate('requests_');
 
     res.json({ success: true });
   } catch (error) {
@@ -994,24 +1114,23 @@ app.post('/api/requests/:id/approve', async (req, res) => {
 // رفض طلب
 app.post('/api/requests/:id/reject', async (req, res) => {
   const { reviewer_id, rejection_reason } = req.body;
+  const rid = req.params.id;
   try {
-    const reason = rejection_reason ? `'${rejection_reason.replace(/'/g, "''")}'` : 'NULL';
-    await run(`
-      UPDATE requests
-      SET status = 'rejected', reviewed_by = ${reviewer_id}, reviewed_at = datetime('now'), rejection_reason = ${reason}
-      WHERE id = ${req.params.id}
-    `);
+    await run(
+      "UPDATE requests SET status = 'rejected', reviewed_by = ?, reviewed_at = datetime('now'), rejection_reason = ? WHERE id = ?",
+      [reviewer_id, rejection_reason || null, rid]
+    );
 
-    // إنشاء إشعار للطالب
-    const request = await queryOne(`SELECT student_id FROM requests WHERE id = ${req.params.id}`);
+    const request = await queryOne('SELECT student_id FROM requests WHERE id = ?', [rid]);
     const message = rejection_reason ? `السبب: ${rejection_reason}` : 'لم يتم تحديد سبب';
-    await run(`
-      INSERT INTO notifications (user_id, title, message)
-      VALUES (${request.student_id}, 'تم رفض طلبك ❌', '${message.replace(/'/g, "''")}')
-    `);
+    await run(
+      'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
+      [request.student_id, 'تم رفض طلبك ❌', message]
+    );
 
-    // إرسال Push Notification
     await notifyRequestRejected(request.student_id, rejection_reason);
+
+    cacheInvalidate('requests_');
 
     res.json({ success: true });
   } catch (error) {
@@ -1023,24 +1142,23 @@ app.post('/api/requests/:id/reject', async (req, res) => {
 
 // إحصائيات طالب
 app.get('/api/stats/student/:studentId', async (req, res) => {
-  const approvedSum = await queryOne(`
-    SELECT COALESCE(SUM(points), 0) as total
-    FROM requests
-    WHERE student_id = ${req.params.studentId} AND status = 'approved'
-  `);
-  const adjustmentsSum = await queryOne(`
-    SELECT COALESCE(SUM(points), 0) as total
-    FROM points_adjustments
-    WHERE student_id = ${req.params.studentId}
-  `);
+  const sid = req.params.studentId;
+  const approvedSum = await queryOne(
+    "SELECT COALESCE(SUM(points), 0) as total FROM requests WHERE student_id = ? AND status = 'approved'",
+    [sid]
+  );
+  const adjustmentsSum = await queryOne(
+    'SELECT COALESCE(SUM(points), 0) as total FROM points_adjustments WHERE student_id = ?',
+    [sid]
+  );
   const totalPoints = Number(approvedSum?.total ?? 0) + Number(adjustmentsSum?.total ?? 0);
   const fuel = pointsToFuelTanks(totalPoints);
 
   const weekNumber = getWeekNumber();
-  const weeklyRequests = await queryOne(`
-    SELECT COUNT(*) as count FROM requests
-    WHERE student_id = ${req.params.studentId} AND week_number = ${weekNumber}
-  `);
+  const weeklyRequests = await queryOne(
+    'SELECT COUNT(*) as count FROM requests WHERE student_id = ? AND week_number = ?',
+    [sid, weekNumber]
+  );
 
   res.json({
     fuel,
@@ -1053,23 +1171,23 @@ app.get('/api/stats/student/:studentId', async (req, res) => {
 
 // إحصائيات أسرة
 app.get('/api/stats/group/:groupId', async (req, res) => {
-  const membersRequestsSum = await queryOne(`
-    SELECT COALESCE(SUM(r.points), 0) as total
-    FROM requests r
-    JOIN users u ON r.student_id = u.id
-    WHERE u.group_id = ${req.params.groupId} AND r.status = 'approved'
-  `);
-  const membersAdjustmentsSum = await queryOne(`
-    SELECT COALESCE(SUM(pa.points), 0) as total
-    FROM points_adjustments pa
-    JOIN users u ON pa.student_id = u.id
-    WHERE u.group_id = ${req.params.groupId}
-  `);
-  const directAdjustmentsSum = await queryOne(`
-    SELECT COALESCE(SUM(points), 0) as total
-    FROM group_points_adjustments
-    WHERE group_id = ${req.params.groupId}
-  `);
+  const gid = req.params.groupId;
+  const membersRequestsSum = await queryOne(
+    `SELECT COALESCE(SUM(r.points), 0) as total FROM requests r
+     JOIN users u ON r.student_id = u.id
+     WHERE u.group_id = ? AND r.status = 'approved'`,
+    [gid]
+  );
+  const membersAdjustmentsSum = await queryOne(
+    `SELECT COALESCE(SUM(pa.points), 0) as total FROM points_adjustments pa
+     JOIN users u ON pa.student_id = u.id
+     WHERE u.group_id = ?`,
+    [gid]
+  );
+  const directAdjustmentsSum = await queryOne(
+    'SELECT COALESCE(SUM(points), 0) as total FROM group_points_adjustments WHERE group_id = ?',
+    [gid]
+  );
   const totalPoints =
     Number(membersRequestsSum?.total ?? 0) +
     Number(membersAdjustmentsSum?.total ?? 0) +
@@ -1106,23 +1224,25 @@ app.get('/api/stats/overview', async (req, res) => {
 
 // جلب إشعارات مستخدم (آخر 100)
 app.get('/api/notifications/:userId', async (req, res) => {
-  const notifications = await queryAll(`
-    SELECT * FROM notifications WHERE user_id = ${req.params.userId} ORDER BY created_at DESC LIMIT 100
-  `);
+  const notifications = await queryAll(
+    'SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100',
+    [req.params.userId]
+  );
   res.json(notifications);
 });
 
 // تحديد الإشعارات كمقروءة
 app.post('/api/notifications/:userId/read', async (req, res) => {
-  await run(`UPDATE notifications SET is_read = 1 WHERE user_id = ${req.params.userId}`);
+  await run('UPDATE notifications SET is_read = 1 WHERE user_id = ?', [req.params.userId]);
   res.json({ success: true });
 });
 
 // عدد الإشعارات غير المقروءة
 app.get('/api/notifications/:userId/unread-count', async (req, res) => {
-  const count = await queryOne(`
-    SELECT COUNT(*) as count FROM notifications WHERE user_id = ${req.params.userId} AND is_read = 0
-  `);
+  const count = await queryOne(
+    'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0',
+    [req.params.userId]
+  );
   res.json({ count: count ? count.count : 0 });
 });
 
@@ -1133,20 +1253,15 @@ app.get('/api/reports/weekly', async (req, res) => {
   const { week } = req.query;
   const weekNumber = week || getWeekNumber();
 
-  const report = await queryAll(`
-    SELECT
-      u.name as student_name,
-      g.name as group_name,
-      r.committee,
-      r.points,
-      r.status,
-      r.created_at
-    FROM requests r
-    JOIN users u ON r.student_id = u.id
-    LEFT JOIN groups g ON u.group_id = g.id
-    WHERE r.week_number = ${weekNumber}
-    ORDER BY r.created_at DESC
-  `);
+  const report = await queryAll(
+    `SELECT u.name as student_name, g.name as group_name, r.committee, r.points, r.status, r.created_at
+     FROM requests r
+     JOIN users u ON r.student_id = u.id
+     LEFT JOIN groups g ON u.group_id = g.id
+     WHERE r.week_number = ?
+     ORDER BY r.created_at DESC`,
+    [weekNumber]
+  );
 
   res.json({ weekNumber, data: report });
 });
@@ -1225,20 +1340,20 @@ function setupArabicHeader(doc, title) {
 
 // تصدير PDF لطالب معين
 app.get('/api/export/student/:studentId', async (req, res) => {
-  const student = await queryOne(`
-    SELECT u.*, g.name as group_name FROM users u
-    LEFT JOIN groups g ON u.group_id = g.id
-    WHERE u.id = ${req.params.studentId}
-  `);
+  const student = await queryOne(
+    'SELECT u.*, g.name as group_name FROM users u LEFT JOIN groups g ON u.group_id = g.id WHERE u.id = ?',
+    [req.params.studentId]
+  );
 
   if (!student) {
     return res.status(404).json({ success: false, message: 'الطالب غير موجود' });
   }
 
   const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-  const approvedRequests = await queryAll(`
-    SELECT points FROM requests WHERE student_id = ${req.params.studentId} AND status = 'approved'
-  `);
+  const approvedRequests = await queryAll(
+    "SELECT points FROM requests WHERE student_id = ? AND status = 'approved'",
+    [req.params.studentId]
+  );
 
   approvedRequests.forEach(r => {
     switch(r.points) {
@@ -1339,22 +1454,24 @@ app.get('/api/export/student/:studentId', async (req, res) => {
 
 // تصدير PDF لأسرة معينة
 app.get('/api/export/group/:groupId', async (req, res) => {
-  const group = await queryOne(`SELECT * FROM groups WHERE id = ${req.params.groupId}`);
+  const group = await queryOne('SELECT * FROM groups WHERE id = ?', [req.params.groupId]);
 
   if (!group) {
     return res.status(404).json({ success: false, message: 'الأسرة غير موجودة' });
   }
 
-  const students = await queryAll(`
-    SELECT u.id, u.name FROM users u WHERE u.group_id = ${req.params.groupId} AND u.role = 'student'
-  `);
+  const students = await queryAll(
+    "SELECT u.id, u.name FROM users u WHERE u.group_id = ? AND u.role = 'student'",
+    [req.params.groupId]
+  );
 
   const studentsWithFuel = [];
   for (const student of students) {
     const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-    const approvedRequests = await queryAll(`
-      SELECT points FROM requests WHERE student_id = ${student.id} AND status = 'approved'
-    `);
+    const approvedRequests = await queryAll(
+      "SELECT points FROM requests WHERE student_id = ? AND status = 'approved'",
+      [student.id]
+    );
 
     approvedRequests.forEach(r => {
       switch(r.points) {
@@ -1512,9 +1629,10 @@ app.get('/api/export/all', async (req, res) => {
   const studentsWithFuel = [];
   for (const student of students) {
     const fuel = { diesel: 0, fuel91: 0, fuel95: 0, fuel98: 0, ethanol: 0 };
-    const approvedRequests = await queryAll(`
-      SELECT points FROM requests WHERE student_id = ${student.id} AND status = 'approved'
-    `);
+    const approvedRequests = await queryAll(
+      "SELECT points FROM requests WHERE student_id = ? AND status = 'approved'",
+      [student.id]
+    );
 
     approvedRequests.forEach(r => {
       switch(r.points) {

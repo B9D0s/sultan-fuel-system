@@ -1,32 +1,25 @@
 const fs = require('fs');
 const path = require('path');
 
-// تحديد البيئة
 const isProduction = process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN;
 
 let db = null;
 let dbType = null; // 'turso' or 'local'
 
-// تهيئة قاعدة البيانات
 const initDatabase = async () => {
   if (isProduction) {
-    // استخدام Turso في البيئة الأونلاين
     await initTursoDatabase();
   } else {
-    // استخدام SQLite محلياً
     await initLocalDatabase();
   }
 
-  // إنشاء الجداول
   await createTables();
-
-  // إنشاء حساب الأدمن الافتراضي
+  await createIndexes();
   await createDefaultAdmin();
 
   console.log(`✅ قاعدة البيانات جاهزة (${dbType})`);
 };
 
-// تهيئة Turso للبيئة الأونلاين
 const initTursoDatabase = async () => {
   const { createClient } = require('@libsql/client');
 
@@ -39,7 +32,6 @@ const initTursoDatabase = async () => {
   console.log('🌐 متصل بقاعدة بيانات Turso السحابية');
 };
 
-// تهيئة SQLite للبيئة المحلية
 const initLocalDatabase = async () => {
   const initSqlJs = require('sql.js');
   const SQL = await initSqlJs();
@@ -53,24 +45,20 @@ const initLocalDatabase = async () => {
     db = new SQL.Database();
   }
 
-  // تفعيل الـ Foreign Keys
   db.run('PRAGMA foreign_keys = ON');
 
   dbType = 'local';
   console.log('💾 متصل بقاعدة بيانات SQLite المحلية');
 };
 
-// إنشاء الجداول
 const createTables = async () => {
-  // إضافة عمود points_hidden إذا لم يكن موجوداً (migration)
   try {
     await run(`ALTER TABLE users ADD COLUMN points_hidden INTEGER DEFAULT 0`, false);
     console.log('✅ تم إضافة عمود points_hidden');
   } catch (e) {
-    // العمود موجود بالفعل، تجاهل الخطأ
+    // العمود موجود بالفعل
   }
 
-  // تأكد من وجود جداول نقاط الأسر (للنسخ القديمة من القاعدة)
   const extraTables = [
     `CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
@@ -193,20 +181,41 @@ const createTables = async () => {
   }
 };
 
-// إنشاء حساب الأدمن الافتراضي
+const createIndexes = async () => {
+  const indexes = [
+    'CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)',
+    'CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_requests_student_id ON requests(student_id)',
+    'CREATE INDEX IF NOT EXISTS idx_requests_status_created ON requests(status, created_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_requests_week_student ON requests(student_id, week_number)',
+    'CREATE INDEX IF NOT EXISTS idx_users_group_id ON users(group_id)',
+    'CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)',
+    'CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id)',
+    'CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read)',
+    'CREATE INDEX IF NOT EXISTS idx_points_adj_student ON points_adjustments(student_id)',
+    'CREATE INDEX IF NOT EXISTS idx_group_points_adj_group ON group_points_adjustments(group_id)',
+  ];
+
+  for (const sql of indexes) {
+    try {
+      await run(sql, false);
+    } catch (e) { /* تجاهل */ }
+  }
+  console.log('📇 تم إنشاء الفهارس');
+};
+
 const createDefaultAdmin = async () => {
   const adminCheck = await queryOne("SELECT id FROM users WHERE role = 'admin'");
 
   if (!adminCheck) {
-    await run(`
-      INSERT INTO users (name, username, password, role)
-      VALUES ('مدير النظام', 'admin', 'admin123', 'admin')
-    `);
+    await run(
+      `INSERT INTO users (name, username, password, role) VALUES (?, ?, ?, ?)`,
+      ['مدير النظام', 'admin', 'admin123', 'admin']
+    );
     console.log('✅ تم إنشاء حساب الأدمن الافتراضي: admin / admin123');
   }
 };
 
-// حفظ قاعدة البيانات للملف (للمحلي فقط)
 const saveDatabase = () => {
   if (dbType === 'local') {
     const DB_PATH = path.join(__dirname, 'sultan_fuel.db');
@@ -214,10 +223,8 @@ const saveDatabase = () => {
     const buffer = Buffer.from(data);
     fs.writeFileSync(DB_PATH, buffer);
   }
-  // Turso يحفظ تلقائياً
 };
 
-// دالة حساب رقم الأسبوع
 const getWeekNumber = (date = new Date()) => {
   const startOfYear = new Date(date.getFullYear(), 0, 1);
   const dayOfWeek = startOfYear.getDay();
@@ -232,21 +239,19 @@ const getWeekNumber = (date = new Date()) => {
   return Math.floor(diffDays / 7) + 1;
 };
 
-// دالة توليد رمز عشوائي من 4 أرقام
 const generateCode = async () => {
   let code;
   let exists = true;
 
   while (exists) {
     code = Math.floor(1000 + Math.random() * 9000).toString();
-    const result = await queryOne(`SELECT id FROM users WHERE code = '${code}'`);
+    const result = await queryOne('SELECT id FROM users WHERE code = ?', [code]);
     exists = !!result;
   }
 
   return code;
 };
 
-// تحويل النقاط إلى نوع الوقود
 const pointsToFuel = (points) => {
   const fuelTypes = {
     1: { name: 'ديزل', color: '#8B7355', emoji: '🟫' },
@@ -258,38 +263,68 @@ const pointsToFuel = (points) => {
   return fuelTypes[points] || null;
 };
 
-// Helper functions للاستعلامات (متوافقة مع البيئتين)
-const queryAll = async (sql) => {
+// Supports both queryAll(sql) and queryAll(sql, params)
+const queryAll = async (sql, params = []) => {
   if (dbType === 'turso') {
-    const result = await db.execute(sql);
+    const result = (params && params.length > 0)
+      ? await db.execute({ sql, args: params })
+      : await db.execute(sql);
     return result.rows;
   } else {
-    // Local SQLite
-    const result = db.exec(sql);
-    if (result.length === 0) return [];
+    if (params && params.length > 0) {
+      const stmt = db.prepare(sql);
+      stmt.bind(params);
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return results;
+    } else {
+      const result = db.exec(sql);
+      if (result.length === 0) return [];
 
-    const columns = result[0].columns;
-    return result[0].values.map(row => {
-      const obj = {};
-      columns.forEach((col, i) => {
-        obj[col] = row[i];
+      const columns = result[0].columns;
+      return result[0].values.map(row => {
+        const obj = {};
+        columns.forEach((col, i) => {
+          obj[col] = row[i];
+        });
+        return obj;
       });
-      return obj;
-    });
+    }
   }
 };
 
-const queryOne = async (sql) => {
-  const results = await queryAll(sql);
+const queryOne = async (sql, params = []) => {
+  const results = await queryAll(sql, params);
   return results.length > 0 ? results[0] : null;
 };
 
-const run = async (sql, save = true) => {
+// Backward-compatible: run(sql), run(sql, false), run(sql, params), run(sql, params, false)
+const run = async (sql, paramsOrSave = [], save = true) => {
+  let params = [];
+  let shouldSave = save;
+
+  if (typeof paramsOrSave === 'boolean') {
+    shouldSave = paramsOrSave;
+  } else if (Array.isArray(paramsOrSave)) {
+    params = paramsOrSave;
+  }
+
   if (dbType === 'turso') {
-    await db.execute(sql);
+    if (params.length > 0) {
+      await db.execute({ sql, args: params });
+    } else {
+      await db.execute(sql);
+    }
   } else {
-    db.run(sql);
-    if (save) saveDatabase();
+    if (params.length > 0) {
+      db.run(sql, params);
+    } else {
+      db.run(sql);
+    }
+    if (shouldSave) saveDatabase();
   }
 };
 
@@ -303,6 +338,21 @@ const getLastInsertId = async () => {
   }
 };
 
+// Races a query against a timeout to prevent hanging
+const queryWithTimeout = async (sql, params = [], timeoutMs = 8000) => {
+  return Promise.race([
+    queryAll(sql, params),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('DATABASE_TIMEOUT')), timeoutMs)
+    )
+  ]);
+};
+
+const queryOneWithTimeout = async (sql, params = [], timeoutMs = 8000) => {
+  const results = await queryWithTimeout(sql, params, timeoutMs);
+  return results.length > 0 ? results[0] : null;
+};
+
 module.exports = {
   initDatabase,
   getWeekNumber,
@@ -312,5 +362,7 @@ module.exports = {
   queryOne,
   run,
   getLastInsertId,
-  saveDatabase
+  saveDatabase,
+  queryWithTimeout,
+  queryOneWithTimeout
 };
