@@ -13,6 +13,7 @@ const userName = document.getElementById('user-name');
 document.addEventListener('DOMContentLoaded', () => {
   initLoginTabs();
   initLoginForms();
+  initLoginCaptureClick();
   checkStoredSession();
   // اظهر تلميح السحب للجداول عند الحاجة
   try {
@@ -23,19 +24,62 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ==================== Login Tabs ====================
-function initLoginTabs() {
+function switchToLoginTab(tabName) {
+  const tab = document.querySelector('.login-tab[data-tab="' + tabName + '"]');
+  if (!tab) return;
   const tabs = document.querySelectorAll('.login-tab');
   const forms = document.querySelectorAll('.login-form');
+  tabs.forEach(t => t.classList.remove('active'));
+  forms.forEach(f => f.classList.remove('active'));
+  tab.classList.add('active');
+  const formEl = document.getElementById(tabName + '-form');
+  if (formEl) formEl.classList.add('active');
+}
 
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'));
-      forms.forEach(f => f.classList.remove('active'));
+/** إذا عنصر خارجي (مثل OneSignal) يلتقط النقر قبل الزر، نلتقط النقر في طور capture ونفحص الإحداثيات */
+function initLoginCaptureClick() {
+  document.addEventListener('click', function loginCapture(e) {
+    const lp = document.getElementById('login-page');
+    if (!lp || !lp.offsetParent) return; /* صفحة الدخول غير ظاهرة */
+    const adminTab = document.querySelector('.login-tab[data-tab="admin"]');
+    const switchBtn = document.getElementById('switch-to-admin-btn');
+    const x = e.clientX;
+    const y = e.clientY;
+    function inside(el) {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+    if (inside(adminTab) || inside(switchBtn)) {
+      switchToLoginTab('admin');
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
+  }, true);
+}
 
-      tab.classList.add('active');
-      document.getElementById(`${tab.dataset.tab}-form`).classList.add('active');
-    });
+function initLoginTabs() {
+  const tabsContainer = document.querySelector('.login-tabs');
+  const forms = document.querySelectorAll('.login-form');
+  if (!tabsContainer) return;
+
+  tabsContainer.addEventListener('click', (e) => {
+    const tab = e.target.closest('.login-tab');
+    if (!tab) return;
+
+    const tabs = document.querySelectorAll('.login-tab');
+    tabs.forEach(t => t.classList.remove('active'));
+    forms.forEach(f => f.classList.remove('active'));
+
+    tab.classList.add('active');
+    const formId = tab.dataset.tab + '-form';
+    const formEl = document.getElementById(formId);
+    if (formEl) formEl.classList.add('active');
   });
+
+  const switchBtn = document.getElementById('switch-to-admin-btn');
+  if (switchBtn) switchBtn.addEventListener('click', () => switchToLoginTab('admin'));
 }
 
 // ==================== Login Forms ====================
@@ -895,8 +939,6 @@ async function renderAdminDashboard() {
 }
 
 // ==================== Groups Page ====================
-let currentGroupId = null;
-
 async function renderGroupsPage() {
   try {
     const groups = await GroupsAPI.getAll();
