@@ -36,12 +36,20 @@ body {
 
 /* ==================== صفحة تسجيل الدخول ==================== */
 .login-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2147483647; /* أقصى قيمة حتى يكون فوق OneSignal وأي overlay */
+  isolation: isolate;
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
   background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 50%, var(--primary-light) 100%);
+  box-sizing: border-box;
 }
 
 .login-box {
@@ -104,6 +112,27 @@ body {
 
 .login-form.active {
   display: block;
+}
+
+.login-switch-link {
+  margin-top: 14px;
+  margin-bottom: 0;
+  text-align: center;
+}
+
+.login-switch-link .link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.9rem;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+  font-family: inherit;
+}
+
+.login-switch-link .link-btn:hover {
+  color: var(--primary-dark);
 }
 
 .form-group {
@@ -1002,10 +1031,10 @@ tr:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* لازم يكون فوق التنقل السفلي ولوحة الإشعارات */
   z-index: 2000;
   opacity: 0;
   visibility: hidden;
+  pointer-events: none;
   transition: all 0.3s ease;
   padding: 20px;
   box-sizing: border-box;
@@ -1014,6 +1043,8 @@ tr:hover {
 .modal-overlay.active {
   opacity: 1;
   visibility: visible;
+  pointer-events: auto;
+  z-index: 2002; /* فوق صفحة الدخول عند فتح المودال */
 }
 
 .modal {

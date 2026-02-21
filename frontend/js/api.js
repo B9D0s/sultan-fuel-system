@@ -51,6 +51,7 @@ const AuthAPI = {
     body: JSON.stringify({ username, password })
   })
 };
+window.AuthAPI = AuthAPI;
 
 // ==================== Groups API ====================
 const GroupsAPI = {
@@ -115,6 +116,7 @@ const StudentsAPI = {
     method: 'DELETE'
   })
 };
+window.StudentsAPI = StudentsAPI;
 
 // ==================== Requests API ====================
 const RequestsAPI = {
@@ -161,6 +163,10 @@ const SettingsAPI = {
     method: 'POST',
     body: JSON.stringify({ key, value })
   }),
+  update: (key, value) => apiCall('/settings', {
+    method: 'POST',
+    body: JSON.stringify({ key, value })
+  }),
   getPointsLog: (limit = 200) => apiCall(`/points-log?limit=${encodeURIComponent(limit)}`)
 };
 
@@ -189,16 +195,6 @@ const ExportAPI = {
   groupPDF: (groupId) => `${API_URL}/export/group/${groupId}`,
 
   allPDF: () => `${API_URL}/export/all`
-};
-
-// ==================== Settings API ====================
-const SettingsAPI = {
-  getAll: () => apiCall('/settings'),
-
-  update: (key, value) => apiCall('/settings', {
-    method: 'POST',
-    body: JSON.stringify({ key, value })
-  })
 };
 
 // ==================== Points Log API ====================
