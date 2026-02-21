@@ -1303,6 +1303,67 @@ tr:hover {
     display: none;
   }
 
+  /* استثناء: عرض هيدر الطلبات والفلاتر على الجوال (ثابت عند التمرير) */
+  .page-header.requests-page-header {
+    display: flex !important;
+    visibility: visible !important;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 20px;
+    position: sticky;
+    top: 75px;
+    z-index: 50;
+    background: var(--white);
+    padding: 12px 15px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    border-radius: 12px;
+    min-height: 60px;
+  }
+
+  .page-header.requests-page-header h1 {
+    width: 100%;
+    margin-bottom: 8px;
+    font-size: 1.3rem;
+  }
+
+  .page-header.requests-page-header .header-actions {
+    display: flex !important;
+    visibility: visible !important;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    flex: 1 1 100%;
+  }
+
+  .page-header.requests-page-header .header-actions select {
+    min-width: 90px;
+    max-width: 140px;
+    padding: 8px 12px;
+    font-size: 0.9rem;
+    flex: 1 1 auto;
+  }
+
+  .page-header.requests-page-header #requests-count-badge {
+    display: inline-block !important;
+    visibility: visible !important;
+    width: auto;
+    margin: 0;
+    font-size: 0.85em;
+    color: #64748b;
+  }
+
+  /* هاتف صغير: الفلاتر والبادج على سطر ثانٍ */
+  @media (max-width: 480px) {
+    .page-header.requests-page-header .header-actions {
+      flex-direction: row;
+      flex-wrap: wrap;
+    }
+    .page-header.requests-page-header .header-actions select {
+      min-width: 100px;
+    }
+  }
+
   .fuel-tanks-container {
     gap: 15px;
   }

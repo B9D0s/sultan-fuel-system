@@ -1880,22 +1880,25 @@ async function togglePointsVisibility(studentId, hide, studentName) {
 }
 
 // ==================== Requests Page ====================
+const REQUEST_COMMITTEES = ['علمي', 'اجتماعي', 'ثقافي', 'إعلامي', 'رياضي', 'متابعة', 'عامة'];
+
 let _requestsState = {
   nextCursor: null,
   totalCount: 0,
   loadedCount: 0,
   loading: false,
   currentFilter: '',
+  currentCommittee: '',
   rowOffset: 0
 };
 
 let _filterDebounceTimer = null;
 
 async function renderRequestsPage() {
-  _requestsState = { nextCursor: null, totalCount: 0, loadedCount: 0, loading: false, currentFilter: '', rowOffset: 0 };
+  _requestsState = { nextCursor: null, totalCount: 0, loadedCount: 0, loading: false, currentFilter: '', currentCommittee: '', rowOffset: 0 };
 
   mainContent.innerHTML = `
-    <div class="page-header">
+    <div class="page-header requests-page-header">
       <h1><i class="fas fa-clipboard-list"></i> إدارة الطلبات</h1>
       <div class="header-actions">
         <span id="requests-count-badge" style="font-size:0.85em;color:#64748b;margin-left:12px;"></span>
@@ -1904,6 +1907,10 @@ async function renderRequestsPage() {
           <option value="pending">قيد المراجعة</option>
           <option value="approved">مقبول</option>
           <option value="rejected">مرفوض</option>
+        </select>
+        <select id="filter-committee" onchange="filterRequests()">
+          <option value="">جميع اللجان</option>
+          ${REQUEST_COMMITTEES.map(c => `<option value="${c}">${c}</option>`).join('')}
         </select>
       </div>
     </div>
@@ -1946,7 +1953,8 @@ async function loadMoreRequests() {
     const result = await RequestsAPI.getAll(
       _requestsState.currentFilter,
       _requestsState.nextCursor,
-      50
+      50,
+      _requestsState.currentCommittee
     );
 
     const { data, pagination } = result;
@@ -2016,8 +2024,10 @@ function renderRequestsRows(requests, offset = 0) {
 async function filterRequests() {
   if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
   _filterDebounceTimer = setTimeout(async () => {
-    const status = document.getElementById('filter-status').value;
-    _requestsState.currentFilter = status;
+    const statusEl = document.getElementById('filter-status');
+    const committeeEl = document.getElementById('filter-committee');
+    _requestsState.currentFilter = statusEl ? statusEl.value : '';
+    _requestsState.currentCommittee = committeeEl ? committeeEl.value : '';
     _requestsState.nextCursor = null;
     _requestsState.loadedCount = 0;
     _requestsState.rowOffset = 0;

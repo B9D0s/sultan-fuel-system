@@ -120,10 +120,11 @@ window.StudentsAPI = StudentsAPI;
 
 // ==================== Requests API ====================
 const RequestsAPI = {
-  getAll: (status = '', cursor = '', limit = 50) => {
+  getAll: (status = '', cursor = '', limit = 50, committee = '') => {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (cursor) params.set('cursor', cursor);
+    if (committee) params.set('committee', committee);
     params.set('limit', limit);
     const qs = params.toString();
     return apiCall(`/requests${qs ? '?' + qs : ''}`);

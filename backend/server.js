@@ -938,8 +938,10 @@ app.get('/api/requests/student/:studentId', async (req, res) => {
 // جلب كل الطلبات (للمشرف) - مع cursor-based pagination
 app.get('/api/requests', async (req, res) => {
   try {
-    const { status, cursor, limit: limitParam } = req.query;
+    const { status, cursor, limit: limitParam, committee } = req.query;
     const limit = Math.min(Math.max(parseInt(limitParam) || 50, 1), 100);
+
+    const VALID_COMMITTEES = ['علمي', 'اجتماعي', 'ثقافي', 'إعلامي', 'رياضي', 'متابعة', 'عامة'];
 
     let cursorId = null;
     if (cursor) {
@@ -956,6 +958,11 @@ app.get('/api/requests', async (req, res) => {
     if (status && ['pending', 'approved', 'rejected'].includes(status)) {
       conditions.push('r.status = ?');
       params.push(status);
+    }
+
+    if (committee && VALID_COMMITTEES.includes(committee)) {
+      conditions.push('r.committee = ?');
+      params.push(committee);
     }
 
     if (cursorId != null) {
@@ -988,15 +995,20 @@ app.get('/api/requests', async (req, res) => {
     }
 
     // Cached count query
-    const countCacheKey = `requests_count_${status || 'all'}`;
+    const countCacheKey = `requests_count_${status || 'all'}_${committee || 'all'}`;
     let totalCount = cacheGet(countCacheKey);
     if (totalCount === undefined) {
       const countParams = [];
-      let countWhere = '';
+      const countConds = [];
       if (status && ['pending', 'approved', 'rejected'].includes(status)) {
-        countWhere = 'WHERE status = ?';
+        countConds.push('status = ?');
         countParams.push(status);
       }
+      if (committee && VALID_COMMITTEES.includes(committee)) {
+        countConds.push('committee = ?');
+        countParams.push(committee);
+      }
+      const countWhere = countConds.length > 0 ? 'WHERE ' + countConds.join(' AND ') : '';
       const countResult = await queryOne(`SELECT COUNT(*) as count FROM requests ${countWhere}`, countParams);
       totalCount = countResult ? countResult.count : 0;
       cacheSet(countCacheKey, totalCount, 30000);
